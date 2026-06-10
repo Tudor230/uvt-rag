@@ -1,0 +1,10 @@
+litserve
+llama-index
+llama-index-embeddings-huggingface
+llama-index-llms-openai-like
+llama-index-vector-stores-postgres
+phoenix
+nest_asyncio
+psycopg2-binary
+torch
+transformers

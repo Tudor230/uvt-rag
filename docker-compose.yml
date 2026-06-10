@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: rag_db
+    volumes:
+
+      - /mnt/external/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rag_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_granite
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - /mnt/external/.cache/huggingface:/root/.cache/huggingface
+      # Mount your RAG project if you need to run your script inside the container
+      - .:/app
+      - /mnt/external/phoenix_data:/app/phoenix_data
+    environment:
+      - HF_TOKEN=your_huggingface_token
+    command: >
+      --model ibm-granite/granite-4.1-8b
+      --gpu-memory-utilization 0.75
+      --max-model-len 16384
+      --port 8000
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix-server
+    ports:
+      - "6006:6006"
+    volumes:
+      - /mnt/external/phoenix_data:/etc/phoenix
+    environment:
+      - PHOENIX_WORKING_DIR=/etc/phoenix
+volumes:
+  postgres-data:
