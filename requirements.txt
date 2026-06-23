@@ -1,7 +1,10 @@
+docling
 litserve
 llama-index
 llama-index-embeddings-huggingface
 llama-index-llms-openai-like
+llama-index-node-parser-docling
+llama-index-readers-docling
 llama-index-vector-stores-postgres
 phoenix
 nest_asyncio

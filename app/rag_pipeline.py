@@ -3,7 +3,6 @@ from phoenix.otel import register
 import nest_asyncio
 
 from llama_index.core import (
-    SimpleDirectoryReader,
     VectorStoreIndex,
     StorageContext,
     Settings,
@@ -58,9 +57,6 @@ def initialize_rag():
         is_chat_model=True,
     )
 
-    Settings.chunk_size = 512
-    Settings.chunk_overlap = 50
-
     # -----------------------
     # Vector DB
     # -----------------------
@@ -79,11 +75,28 @@ def initialize_rag():
     # -----------------------
     # Load docs + index
     # -----------------------
-    documents = SimpleDirectoryReader(DOCS_DIR).load_data()
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host=POSTGRES_CONFIG["host"],
+        port=POSTGRES_CONFIG["port"],
+        user=POSTGRES_CONFIG["user"],
+        password=POSTGRES_CONFIG["password"],
+        database=POSTGRES_CONFIG["database"],
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE data_{POSTGRES_CONFIG['table_name']}")
+        logging.getLogger(__name__).info("Purged vector store table.")
+    conn.close()
+
+    from app.utils import DoclingIngester
+
+    nodes = DoclingIngester(docs_dir=DOCS_DIR).ingest()
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-    index = VectorStoreIndex.from_documents(
-        documents,
+    index = VectorStoreIndex(
+        nodes,
         storage_context=storage_context,
         show_progress=True,
     )

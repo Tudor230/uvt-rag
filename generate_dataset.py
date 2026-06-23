@@ -8,8 +8,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from llama_index.core import Settings, SimpleDirectoryReader
-from llama_index.core.node_parser import SentenceSplitter
 from openai import AsyncOpenAI
 
 load_dotenv()
@@ -43,17 +41,12 @@ def load_knowledge_graph(kg_path: Path) -> KnowledgeGraph:
 
 
 def build_chunks(docs_path: Path) -> list[str]:
-    # TODO: Add proper chunking
-    logging.info("Loading documents from %s ...", docs_path)
-    documents = SimpleDirectoryReader(str(docs_path)).load_data()
-    logging.info("Loaded %d documents.", len(documents))
+    logging.info("Loading documents from %s with Docling ...", docs_path)
+    from app.utils import DoclingIngester
 
-    Settings.chunk_size = 512
-    Settings.chunk_overlap = 50
-    splitter = SentenceSplitter(chunk_size=512, chunk_overlap=50)
-    nodes = splitter.get_nodes_from_documents(documents)
+    nodes = DoclingIngester(docs_dir=docs_path).ingest()
     chunks = [node.get_content() for node in nodes]
-    logging.info("Produced %d chunks (chunk_size=512, overlap=50).", len(chunks))
+    logging.info("Produced %d chunks.", len(chunks))
     return chunks
 
 
