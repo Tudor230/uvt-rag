@@ -56,7 +56,6 @@ def initialize_rag():
         api_base=LLM_CONFIG["api_base"],
         api_key=LLM_CONFIG["api_key"],
         is_chat_model=True,
-        streaming=True,
     )
 
     Settings.chunk_size = 512

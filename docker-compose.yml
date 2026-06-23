@@ -31,7 +31,6 @@ services:
               capabilities: [gpu]
     volumes:
       - /mnt/external/.cache/huggingface:/root/.cache/huggingface
-      # Mount your RAG project if you need to run your script inside the container
       - .:/app
       - /mnt/external/phoenix_data:/app/phoenix_data
     environment:

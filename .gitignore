@@ -1,2 +1,5 @@
 docs/
+data/
 **/__pycache__
+docs-ragas/
+.env
