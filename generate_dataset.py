@@ -79,7 +79,6 @@ def setup_embeddings() -> RagasEmbeddings:
 def build_minimal_transforms(llm, embeddings):
     """
     Only the transforms actually needed by SingleHopSpecificQuerySynthesizer.
-    ThemesExtractor is skipped — it causes connection errors with Granite.
     """
     filter_chunks = lambda n: n.type == NodeType.CHUNK
     return [

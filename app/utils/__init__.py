@@ -1,3 +1,3 @@
-from app.utils.docling import DoclingIngester
+from app.utils.parser import DoclingIngester
 
 __all__ = ["DoclingIngester"]

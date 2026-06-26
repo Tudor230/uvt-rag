@@ -1,14 +1,17 @@
+import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 from docling.chunking import HybridChunker, BaseChunker
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 from llama_index.readers.docling import DoclingReader
 from llama_index.node_parser.docling import DoclingNodeParser
-from llama_index.core.schema import TextNode
-
+from llama_index.core.schema import TextNode, Document
+from docling_core.types.doc.labels import DocItemLabel
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHUNK_TOKENS = 1024
@@ -22,10 +25,17 @@ class DoclingIngester:
         chunker: Optional[BaseChunker] = None,
         max_tokens: int = _DEFAULT_CHUNK_TOKENS,
     ):
+        self.pipeline_options = PdfPipelineOptions()
+        self.pipeline_options.do_formula_enrichment = True
         self._docs_dir = Path(docs_dir)
+        self._doc_converter = doc_converter or DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=self.pipeline_options)
+            }
+        )
         self._reader = DoclingReader(
             export_type=DoclingReader.ExportType.JSON,
-            doc_converter=doc_converter or DocumentConverter(),
+            doc_converter=self._doc_converter
         )
 
         if chunker is None:
@@ -44,8 +54,28 @@ class DoclingIngester:
             return []
 
         logger.info("Loading %d PDFs from %s with DoclingReader ...", len(pdf_paths), self._docs_dir)
-        documents = list(self._reader.load_data(file_path=pdf_paths))
-        logger.info("Loaded %d documents.", len(documents))
+        # documents = list(self._reader.load_data(file_path=pdf_paths))
+        # logger.info("Loaded %d documents.", len(documents))
+        documents = []
+        for path in pdf_paths:
+            # 1. Parse the document natively with Docling
+            result = self._doc_converter.convert(path)
+            dl_doc = result.document
+            
+            # 2. Intercept and fix misclassified layout elements
+            for item, level in dl_doc.iterate_items():
+                if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.FORMULA, DocItemLabel.TITLE):
+                    text = getattr(item, "text", "").strip()
+                    
+                    if ("=" in text) or ("unde" in text) and len(text) < 150:
+                        # Demote it to standard text so HybridChunker merges it
+                        item.label = DocItemLabel.TEXT 
+
+            doc_dict = dl_doc.export_to_dict()
+            llama_doc = Document(text=json.dumps(doc_dict))
+            documents.append(llama_doc)
+
+        logger.info("Parsing documents with DoclingNodeParser ...")
 
         logger.info("Parsing documents with DoclingNodeParser ...")
         nodes = self._node_parser.get_nodes_from_documents(documents)
