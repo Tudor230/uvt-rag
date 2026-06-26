@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
+import re
 
 from docling.chunking import HybridChunker, BaseChunker
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -24,6 +25,7 @@ class DoclingIngester:
         doc_converter: Optional[DocumentConverter] = None,
         chunker: Optional[BaseChunker] = None,
         max_tokens: int = _DEFAULT_CHUNK_TOKENS,
+        debug: bool = False,
     ):
         self.pipeline_options = PdfPipelineOptions()
         self.pipeline_options.do_formula_enrichment = True
@@ -61,9 +63,26 @@ class DoclingIngester:
             # 1. Parse the document natively with Docling
             result = self._doc_converter.convert(path)
             dl_doc = result.document
+
+            if (self.debug == True):
+                inspection_data = []
+                
+                for item, level in dl_doc.iterate_items():
+                    item_dict = item.model_dump(exclude_none=True, mode="json")
+                    
+                    item_dict["_docling_level"] = level 
+                    
+                    inspection_data.append(item_dict)
+                
+                export_path = path.with_name(f"{path.stem}_inspection.json")
+                with open(export_path, "w", encoding="utf-8") as f:
+                    json.dump(inspection_data, f, indent=2)
             
             # 2. Intercept and fix misclassified layout elements
             for item, level in dl_doc.iterate_items():
+                if hasattr(item, "text") and isinstance(item.text, str):
+                    cleaned_text = re.sub(r"(?i)pagina\s+\d+\s+din\s+\d+", "", item.text).strip()
+                    item.text = cleaned_text
                 if item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.FORMULA, DocItemLabel.TITLE):
                     text = getattr(item, "text", "").strip()
                     
@@ -116,7 +135,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, force=True)
 
-    ingester = DoclingIngester(docs_dir=docs_dir, max_tokens=args.max_tokens)
+    ingester = DoclingIngester(docs_dir=docs_dir, max_tokens=args.max_tokens, debug=True)
     nodes = ingester.ingest()
 
     limit = min(args.max_nodes, len(nodes))
