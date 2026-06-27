@@ -39,6 +39,7 @@ class DoclingIngester:
             export_type=DoclingReader.ExportType.JSON,
             doc_converter=self._doc_converter
         )
+        self.debug = debug
 
         if chunker is None:
             tokenizer = HuggingFaceTokenizer.from_pretrained(
@@ -93,8 +94,6 @@ class DoclingIngester:
             doc_dict = dl_doc.export_to_dict()
             llama_doc = Document(text=json.dumps(doc_dict))
             documents.append(llama_doc)
-
-        logger.info("Parsing documents with DoclingNodeParser ...")
 
         logger.info("Parsing documents with DoclingNodeParser ...")
         nodes = self._node_parser.get_nodes_from_documents(documents)

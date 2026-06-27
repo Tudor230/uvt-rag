@@ -19,7 +19,7 @@ services:
     restart: always
   vllm:
     image: vllm/vllm-openai:latest
-    container_name: vllm_granite
+    container_name: vllm
     ports:
       - "8000:8000"
     deploy:
