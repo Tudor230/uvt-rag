@@ -6,7 +6,7 @@ import re
 
 from docling.chunking import HybridChunker, BaseChunker
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
 from docling.datamodel.base_models import InputFormat
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 from llama_index.readers.docling import DoclingReader
@@ -29,6 +29,8 @@ class DoclingIngester:
     ):
         self.pipeline_options = PdfPipelineOptions()
         self.pipeline_options.do_formula_enrichment = True
+        self.pipeline_options.ocr_options = EasyOcrOptions(lang=["ro", "en"], use_gpu=True)
+        self.pipeline_options.images_scale = 2.0
         self._docs_dir = Path(docs_dir)
         self._doc_converter = doc_converter or DocumentConverter(
             format_options={
