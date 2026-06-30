@@ -231,7 +231,10 @@ def main():
         kg = KnowledgeGraph(nodes=nodes)
         apply_transforms(kg, default_transforms_for_prechunked(ragas_llm, ragas_embeddings), run_config=run_config)
         generator.knowledge_graph = kg
-
+        # ── Save knowledge graph ──────────────────────────────────────────────
+        kg_path = output_path.with_name("knowledge_graph.json")
+        generator.knowledge_graph.save(str(kg_path))
+        logging.info("Saved knowledge graph to %s", kg_path)
         logging.info(
             "Generating %d test samples (max_workers=%d, batch_size=%d) ...",
             testset_size, max_workers, batch_size,
@@ -245,11 +248,6 @@ def main():
         )
 
     logging.info("Generation complete. Collected %d samples.", len(testset))
-
-    # ── Save knowledge graph ──────────────────────────────────────────────
-    kg_path = output_path.with_name("knowledge_graph.json")
-    generator.knowledge_graph.save(str(kg_path))
-    logging.info("Saved knowledge graph to %s", kg_path)
 
     # ── Export to CSV ─────────────────────────────────────────────────────
     df = testset.to_pandas()
