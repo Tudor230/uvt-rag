@@ -20,9 +20,12 @@ _DEFAULT_CHUNK_TOKENS = 1024
 
 _HEADING_PATTERNS = [
     re.compile(r"^Articolul\s+\d+\."),
-    re.compile(r"^Programul\s+de\s+studii\s+universitare\s+de\s+licență:.+"),
+    re.compile(r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+"),
     re.compile(r"^Anexa\s+\d+\."),
     re.compile(r"^CAPITOLUL\s"),
+    re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),
+    re.compile(r"^[I|V|X]+\.\s+[A-Z\sȘȚĂÎÂ]+"),
+    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+")
 ]
 
 
@@ -62,6 +65,7 @@ class DoclingIngester:
 
     #TODO: This is a workaround for a bug in Docling where the body children are not ordered correctly.
     #It brakes two column layouts and other complex layouts.
+    #It also sometimes sends items near the top, need to investigate
     @staticmethod
     def _reorder_body_children(doc_dict: dict) -> dict:
         items_by_ref = {}
@@ -104,6 +108,7 @@ class DoclingIngester:
         # documents = list(self._reader.load_data(file_path=pdf_paths))
         # logger.info("Loaded %d documents.", len(documents))
         documents = []
+        items_to_delete = []
         for path in pdf_paths:
             # 1. Parse the document natively with Docling
             result = self._doc_converter.convert(path)
@@ -133,7 +138,7 @@ class DoclingIngester:
                 is_heading = any(p.match(text) for p in _HEADING_PATTERNS)
                 is_formula = ("=" in text) or ("unde" in text) and len(text) < 150
 
-                if is_heading and item.label is DocItemLabel.TEXT:
+                if is_heading and item.label in (DocItemLabel.TEXT, DocItemLabel.LIST_ITEM):
                     heading_text = text
                     remaining = ""
                     if "\n" in text:
@@ -154,15 +159,12 @@ class DoclingIngester:
                     )
                     if remaining:
                         dl_doc.add_text(
-                            label=DocItemLabel.TEXT,
+                            label=item.label, 
                             text=remaining,
                             prov=item.prov[0] if item.prov else None,
                             parent=dl_doc.body,
                         )
-                    dl_doc.body.children = [
-                        c for c in dl_doc.body.children
-                        if getattr(c, "cref", "") != item.self_ref
-                    ]
+                    items_to_delete.append(item)
                     continue
 
                 if is_formula and item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.FORMULA, DocItemLabel.TITLE):
@@ -172,10 +174,7 @@ class DoclingIngester:
                         prov=item.prov[0] if item.prov else None,
                         parent=dl_doc.body,
                     )
-                    dl_doc.body.children = [
-                        c for c in dl_doc.body.children
-                        if getattr(c, "cref", "") != item.self_ref
-                    ]
+                    items_to_delete.append(item)
                     continue
 
                 if item.label is DocItemLabel.SECTION_HEADER and not is_heading:
@@ -185,10 +184,18 @@ class DoclingIngester:
                         prov=item.prov[0] if item.prov else None,
                         parent=dl_doc.body,
                     )
-                    dl_doc.body.children = [
-                        c for c in dl_doc.body.children
-                        if getattr(c, "cref", "") != item.self_ref
-                    ]
+                    items_to_delete.append(item)
+
+            for target_item in reversed(items_to_delete):
+                try:
+                    dl_doc.delete_items_range(
+                        start=target_item,
+                        end=target_item,
+                        start_inclusive=True,
+                        end_inclusive=True
+                    )
+                except Exception as e:
+                    logger.debug("Skipping native deletion for item due to tree structure constraints: %s", e)
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
