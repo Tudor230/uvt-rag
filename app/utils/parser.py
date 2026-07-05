@@ -19,15 +19,45 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CHUNK_TOKENS = 1024
 
 _HEADING_PATTERNS = [
-    re.compile(r"^Articolul\s+\d+\."),
+    re.compile(r"^Articolul\s+\d+\s*\."),
     re.compile(r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+"),
-    re.compile(r"^Anexa\s+\d+\."),
+    re.compile(r"^(?:Anexa|Annex)\s+\d+\.?"),
     re.compile(r"^CAPITOLUL\s"),
     re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),
     re.compile(r"^[I|V|X]+\.\s+[A-Z\sȘȚĂÎÂ]+"),
     re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+"),
     re.compile(r"^Regulamentul\s+privind\s+")
 ]
+
+_PAGE_HEADER_PATTERNS = [
+    re.compile(r"^Regulamentul\s+Facultății\s+de\s+"),
+]
+
+# Catches orphaned running header continuation fragments at y > 680
+# (e.g. "organizarea și desfășurarea") regardless of split boundaries.
+_RH_CONTINUATION_RE = re.compile(
+    r"^(?:privind\s+)?(?:"
+    r"organizarea\s+și\s+desfășurarea"
+    r"|procesului\s+de\s+admitere\s+pentru"
+    r"|programele\s+de\s+studii"
+    r"|universitare\s+de\s+la\s+ciclul\s+de"
+    r"|studii\s+de\s+licență"
+    r")$"
+)
+
+_RUNNING_HEADER_RE = re.compile(
+    r"(?:^|\n|(?<=[.!?])\s)Regulamentul\s+Facultății\s+de\s+"
+    r"(?:.*?studii\s+de\s+licență|.*?privind(?:\s|$))",
+    re.DOTALL,
+)
+
+_PAGE_NUM_FRAGMENTED_RE = re.compile(
+    r"(?:^|\n)(?:Pagina|pagina)\s*\n\d+\s*\ndin\s*\n\d+",
+)
+
+_NR_ANNEX_RE = re.compile(
+    r"\b[Nn]r\.?\s+anexe\s+\d+\b",
+)
 
 
 class DoclingIngester:
@@ -171,13 +201,36 @@ class DoclingIngester:
             # 2. Intercept and fix misclassified layout elements
             for item, level in dl_doc.iterate_items():
                 if hasattr(item, "text") and isinstance(item.text, str):
-                    cleaned_text = re.sub(r"(?i)pagina\s+\d+\s+din\s+\d+", "", item.text).strip()
+                    original_text = item.text
+                    cleaned_text = re.sub(r"(?i)pagina\s+\d+\s+din\s+\d+", "", original_text).strip()
                     item.text = cleaned_text
+                    if re.match(r"(?i)^\s*pagina\s+\d+\s+din\s+\d+\s*$", original_text):
+                        items_to_delete.append(item)
+                        continue
 
                 text = getattr(item, "text", "").strip()
+                is_running_header = any(p.match(text) for p in _PAGE_HEADER_PATTERNS)
+                if is_running_header:
+                    items_to_delete.append(item)
+                    continue
+
+                try:
+                    y = item.prov[0].bbox.t
+                except (IndexError, AttributeError):
+                    y = None
+
+                if y is not None and y > 680:
+                    if _RH_CONTINUATION_RE.match(text):
+                        items_to_delete.append(item)
+                        continue
+                    if re.match(r"(?i)^(?:pagina(?:\s+\d+(?:\s+din)?)?|\d+\s+din\s+\d+|pagina\s+\d+\s+din\s*)$", text):
+                        items_to_delete.append(item)
+                        continue
+                    if re.match(r"(?i)^nr\.?\s+anexe", text):
+                        items_to_delete.append(item)
+                        continue
+
                 is_heading = any(p.match(text) for p in _HEADING_PATTERNS)
-                is_formula = ("=" in text) or ("unde" in text) and len(text) < 150
-                is_page_header = bool(re.match(r"^Regulamentul\s+(?!privind).{50,}", text))
 
                 if is_heading and item.label in (DocItemLabel.TEXT, DocItemLabel.LIST_ITEM):
                     heading_text = text
@@ -208,17 +261,7 @@ class DoclingIngester:
                     items_to_delete.append(item)
                     continue
 
-                if is_formula and item.label in (DocItemLabel.SECTION_HEADER, DocItemLabel.FORMULA, DocItemLabel.TITLE):
-                    dl_doc.add_text(
-                        label=DocItemLabel.TEXT,
-                        text=text,
-                        prov=item.prov[0] if item.prov else None,
-                        parent=dl_doc.body,
-                    )
-                    items_to_delete.append(item)
-                    continue
-
-                if item.label is DocItemLabel.SECTION_HEADER and (not is_heading or is_page_header):
+                if item.label is DocItemLabel.SECTION_HEADER and not is_heading:
                     dl_doc.add_text(
                         label=DocItemLabel.TEXT,
                         text=text,
@@ -260,7 +303,51 @@ class DoclingIngester:
         nodes = self._node_parser.get_nodes_from_documents(documents)
         logger.info("Produced %d nodes.", len(nodes))
 
-        return nodes
+        # Post-process: remove running page headers and fragmented page numbers
+        # that weren't caught pre-chunking (e.g. OCR-merged or split across items)
+        for node in nodes:
+            content = node.get_content()
+            new_content = _RUNNING_HEADER_RE.sub("\n", content)
+            new_content = _PAGE_NUM_FRAGMENTED_RE.sub("\n", new_content)
+            new_content = _NR_ANNEX_RE.sub("", new_content)
+            if new_content != content:
+                node.text = new_content
+
+        # Post-process: promote headings from empty chunks to the next chunk
+        _filtered = []
+        pending_headings = []
+        for node in nodes:
+            content = node.get_content().strip()
+            is_empty = len(content) < 10
+            node_headings = node.metadata.get("headings", [])
+            if is_empty:
+                pending_headings.extend(node_headings)
+            else:
+                if pending_headings:
+                    node.metadata["headings"] = pending_headings + node_headings
+                    pending_headings = []
+                _filtered.append(node)
+
+        if pending_headings:
+            logger.debug("Dropping %d trailing empty heading(s): %s", len(pending_headings), pending_headings)
+
+        # Nest articles under their parent annex in the heading hierarchy
+        current_annex = None
+        for node in _filtered:
+            headings = node.metadata.get("headings", [])
+            if not headings:
+                current_annex = None
+                continue
+            last = headings[-1]
+            if re.match(r"^Anexa\s+\d+\.?", last):
+                current_annex = last
+            elif current_annex and re.match(r"^Articolul\s+\d+", last):
+                if len(headings) == 1 or headings[0] != current_annex:
+                    node.metadata["headings"] = [current_annex] + headings
+            else:
+                current_annex = None
+
+        return _filtered
 
 
 if __name__ == "__main__":
