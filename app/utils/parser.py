@@ -25,7 +25,8 @@ _HEADING_PATTERNS = [
     re.compile(r"^CAPITOLUL\s"),
     re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),
     re.compile(r"^[I|V|X]+\.\s+[A-Z\sȘȚĂÎÂ]+"),
-    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+")
+    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+"),
+    re.compile(r"^Regulamentul\s+privind\s+")
 ]
 
 
@@ -63,9 +64,6 @@ class DoclingIngester:
 
         self._node_parser = DoclingNodeParser(chunker=chunker)
 
-    #TODO: This is a workaround for a bug in Docling where the body children are not ordered correctly.
-    #It brakes two column layouts and other complex layouts.
-    #It also sometimes sends items near the top, need to investigate
     @staticmethod
     def _reorder_body_children(doc_dict: dict) -> dict:
         items_by_ref = {}
@@ -73,37 +71,70 @@ class DoclingIngester:
             for item in doc_dict.get(category, []):
                 items_by_ref[item["self_ref"]] = item
 
-        def _prov_sort_key(item: dict):
+        def _first_prov(item: dict):
             prov = item.get("prov", [])
             if isinstance(prov, list) and prov:
-                p = prov[0]
-                page = p.get("page_no", 0) or 0
-                y = p.get("bbox", {}).get("t", 0)
-                x = p.get("bbox", {}).get("l", 0)
-                return (page, -y, x)
-            return None
-
-        def _sort_key(ref_dict):
-            ref = ref_dict.get("$ref", "")
-            item = items_by_ref.get(ref, {})
-            key = _prov_sort_key(item)
-            if key is not None:
-                return key
+                return prov[0]
             queue = list(item.get("children", []))
             while queue:
                 child_ref_dict = queue.pop(0)
                 child_ref = child_ref_dict.get("$ref", child_ref_dict) if isinstance(child_ref_dict, dict) else child_ref_dict
                 child = items_by_ref.get(child_ref, {})
-                key = _prov_sort_key(child)
-                if key is not None:
-                    return key
+                prov = child.get("prov", [])
+                if isinstance(prov, list) and prov:
+                    return prov[0]
                 grandchildren = child.get("children", [])
                 if grandchildren:
                     queue.extend(grandchildren)
-            return (0, 0, 0)
+            return None
 
-        if "body" in doc_dict and "children" in doc_dict["body"]:
-            doc_dict["body"]["children"].sort(key=_sort_key)
+        if "body" not in doc_dict or "children" not in doc_dict["body"]:
+            return doc_dict
+
+        children = doc_dict["body"]["children"]
+
+        from collections import defaultdict
+
+        page_items = defaultdict(list)
+        child_info = []
+        for idx, child in enumerate(children):
+            ref = child.get("$ref", "")
+            item = items_by_ref.get(ref, {})
+            p = _first_prov(item)
+            if p:
+                page = p.get("page_no", 0) or 0
+                y = p.get("bbox", {}).get("t", 0)
+                x = p.get("bbox", {}).get("l", 0)
+            else:
+                page, y, x = 0, 0, 0
+            child_info.append((child, page, y, x))
+            page_items[page].append((idx, y, x))
+
+        two_column_pages = set()
+        for page, items in page_items.items():
+            for i in range(len(items)):
+                y1, x1 = items[i][1], items[i][2]
+                for j in range(i + 1, len(items)):
+                    y2, x2 = items[j][1], items[j][2]
+                    if abs(y1 - y2) <= 2 and abs(x1 - x2) > 150:
+                        two_column_pages.add(page)
+                        break
+                if page in two_column_pages:
+                    break
+
+        def _sort_key(info):
+            _, page, y, x = info
+            if page in two_column_pages:
+                pg_items = page_items[page]
+                min_x = min(it[2] for it in pg_items)
+                max_x = max(it[2] for it in pg_items)
+                mid_x = (min_x + max_x) / 2
+                col = 0 if x < mid_x else 1
+                return (page, col, -y)
+            return (page, -y, x)
+
+        child_info.sort(key=_sort_key)
+        doc_dict["body"]["children"] = [info[0] for info in child_info]
 
         return doc_dict
 
