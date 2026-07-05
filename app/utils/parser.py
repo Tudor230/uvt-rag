@@ -73,25 +73,34 @@ class DoclingIngester:
             for item in doc_dict.get(category, []):
                 items_by_ref[item["self_ref"]] = item
 
-        def _sort_key(ref_dict):
-            ref = ref_dict.get("$ref", "")
-            item = items_by_ref.get(ref, {})
+        def _prov_sort_key(item: dict):
             prov = item.get("prov", [])
             if isinstance(prov, list) and prov:
                 p = prov[0]
                 page = p.get("page_no", 0) or 0
                 y = p.get("bbox", {}).get("t", 0)
-                return (page, -y)
-            children = item.get("children", [])
-            if children:
-                first = children[0]
-                first_ref = first.get("$ref", first) if isinstance(first, dict) else first
-                child = items_by_ref.get(first_ref, {})
-                child_prov = child.get("prov", [])
-                if isinstance(child_prov, list) and child_prov:
-                    cp = child_prov[0]
-                    return (cp.get("page_no", 0) or 0, -(cp.get("bbox", {}).get("t", 0)))
-            return (0, 0)
+                x = p.get("bbox", {}).get("l", 0)
+                return (page, -y, x)
+            return None
+
+        def _sort_key(ref_dict):
+            ref = ref_dict.get("$ref", "")
+            item = items_by_ref.get(ref, {})
+            key = _prov_sort_key(item)
+            if key is not None:
+                return key
+            queue = list(item.get("children", []))
+            while queue:
+                child_ref_dict = queue.pop(0)
+                child_ref = child_ref_dict.get("$ref", child_ref_dict) if isinstance(child_ref_dict, dict) else child_ref_dict
+                child = items_by_ref.get(child_ref, {})
+                key = _prov_sort_key(child)
+                if key is not None:
+                    return key
+                grandchildren = child.get("children", [])
+                if grandchildren:
+                    queue.extend(grandchildren)
+            return (0, 0, 0)
 
         if "body" in doc_dict and "children" in doc_dict["body"]:
             doc_dict["body"]["children"].sort(key=_sort_key)
@@ -137,6 +146,7 @@ class DoclingIngester:
                 text = getattr(item, "text", "").strip()
                 is_heading = any(p.match(text) for p in _HEADING_PATTERNS)
                 is_formula = ("=" in text) or ("unde" in text) and len(text) < 150
+                is_page_header = bool(re.match(r"^Regulamentul\s+(?!privind).{50,}", text))
 
                 if is_heading and item.label in (DocItemLabel.TEXT, DocItemLabel.LIST_ITEM):
                     heading_text = text
@@ -177,7 +187,7 @@ class DoclingIngester:
                     items_to_delete.append(item)
                     continue
 
-                if item.label is DocItemLabel.SECTION_HEADER and not is_heading:
+                if item.label is DocItemLabel.SECTION_HEADER and (not is_heading or is_page_header):
                     dl_doc.add_text(
                         label=DocItemLabel.TEXT,
                         text=text,
