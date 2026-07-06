@@ -14,23 +14,34 @@ from llama_index.readers.docling import DoclingReader
 from llama_index.node_parser.docling import DoclingNodeParser
 from llama_index.core.schema import TextNode, Document
 from docling_core.types.doc.labels import DocItemLabel
+from docling_core.types.doc.document import RefItem, TextItem
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHUNK_TOKENS = 1024
 
+_ARTICLE_PATTERN = re.compile(
+    r"^(?:Articolul|Article|Art\.?)\s+\d[\d\s]*(?:\s*\.)?(?=\s|[A-Z]|$)",
+    re.IGNORECASE,
+)
+_ANNEX_PATTERN = re.compile(
+    r"^(?:Anexa|Annex)\s+(?:Nr\s*\.\s+)?\d+\.?",
+    re.IGNORECASE,
+)
+
 _HEADING_PATTERNS = [
-    re.compile(r"^Articolul\s+\d+\s*\."),
-    re.compile(r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+"),
-    re.compile(r"^(?:Anexa|Annex)\s+\d+\.?"),
-    re.compile(r"^CAPITOLUL\s"),
+    _ARTICLE_PATTERN,
+    re.compile(r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+", re.IGNORECASE),
+    _ANNEX_PATTERN,
+    re.compile(r"^CAPITOLUL\s", re.IGNORECASE),
+    re.compile(r"^SECȚIUNEA\s+[IVXL]+", re.IGNORECASE),
     re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),
-    re.compile(r"^[I|V|X]+\.\s+[A-Z\sȘȚĂÎÂ]+"),
-    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+"),
-    re.compile(r"^Regulamentul\s+privind\s+")
+    re.compile(r"^[IVXL]+\.(?:\s*\d+\s*\.)?\s+[A-Z\sȘȚĂÎÂ\-]+"),
+    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+", re.IGNORECASE),
+    re.compile(r"^Regulamentul\s+privind\s+", re.IGNORECASE),
 ]
 
 _PAGE_HEADER_PATTERNS = [
-    re.compile(r"^Regulamentul\s+Facultății\s+de\s+"),
+    re.compile(r"^Regulamentul\s+Facultății\s+de\s+", re.IGNORECASE),
 ]
 
 # Catches orphaned running header continuation fragments at y > 680
@@ -42,21 +53,24 @@ _RH_CONTINUATION_RE = re.compile(
     r"|programele\s+de\s+studii"
     r"|universitare\s+de\s+la\s+ciclul\s+de"
     r"|studii\s+de\s+licență"
-    r")$"
+    r")$",
+    re.IGNORECASE,
 )
 
 _RUNNING_HEADER_RE = re.compile(
     r"(?:^|\n|(?<=[.!?])\s)Regulamentul\s+Facultății\s+de\s+"
     r"(?:.*?studii\s+de\s+licență|.*?privind(?:\s|$))",
-    re.DOTALL,
+    re.IGNORECASE | re.DOTALL,
 )
 
 _PAGE_NUM_FRAGMENTED_RE = re.compile(
-    r"(?:^|\n)(?:Pagina|pagina)\s*\n\d+\s*\ndin\s*\n\d+",
+    r"(?:^|\n)pagina\s*\n\d+\s*\ndin\s*\n\d+",
+    re.IGNORECASE,
 )
 
 _NR_ANNEX_RE = re.compile(
-    r"\b[Nn]r\.?\s+anexe\s+\d+\b",
+    r"\bnr\.?\s+anexe\s+\d+\b",
+    re.IGNORECASE,
 )
 
 
@@ -183,6 +197,7 @@ class DoclingIngester:
             # 1. Parse the document natively with Docling
             result = self._doc_converter.convert(path)
             dl_doc = result.document
+            heading_candidates = []
 
             if (self.debug == True):
                 inspection_data = []
@@ -246,6 +261,19 @@ class DoclingIngester:
                                 heading_text = m.group(0).strip()
                                 remaining = text[m.end():].strip()
                                 break
+
+                    parent_cref = item.parent.cref if item.parent else None
+                    if parent_cref and parent_cref != "#/body":
+                        parent_group = next(
+                            (g for g in dl_doc.groups if g.self_ref == parent_cref),
+                            None,
+                        )
+                        if parent_group is not None:
+                            heading_candidates.append(
+                                (item, heading_text, remaining, parent_group)
+                            )
+                            continue
+
                     dl_doc.add_heading(
                         text=heading_text,
                         prov=item.prov[0] if item.prov else None,
@@ -253,7 +281,7 @@ class DoclingIngester:
                     )
                     if remaining:
                         dl_doc.add_text(
-                            label=item.label, 
+                            label=item.label,
                             text=remaining,
                             prov=item.prov[0] if item.prov else None,
                             parent=dl_doc.body,
@@ -280,6 +308,46 @@ class DoclingIngester:
                     )
                 except Exception as e:
                     logger.debug("Skipping native deletion for item due to tree structure constraints: %s", e)
+
+            # 3. Split groups at heading boundaries
+            for item, heading_text, remaining, parent_group in heading_candidates:
+                item_ref = item.get_ref()
+                pos = next(
+                    (i for i, c in enumerate(parent_group.children) if c == item_ref),
+                    None,
+                )
+                if pos is None:
+                    continue
+
+                after_refs = parent_group.children[pos + 1 :]
+
+                h = dl_doc.insert_heading(
+                    sibling=parent_group,
+                    text=heading_text,
+                    prov=item.prov[0] if item.prov else None,
+                    after=True,
+                )
+
+                sib = h
+                if remaining:
+                    sib = dl_doc.insert_text(
+                        sibling=h,
+                        label=DocItemLabel.TEXT,
+                        text=remaining,
+                        prov=item.prov[0] if item.prov else None,
+                        after=True,
+                    )
+
+                new_group = dl_doc.insert_list_group(sibling=sib, after=True)
+
+                for child_ref in after_refs:
+                    child_item = child_ref.resolve(dl_doc)
+                    parent_group.children.remove(child_ref)
+                    new_group.children.append(child_ref)
+                    child_item.parent = RefItem(cref=new_group.self_ref)
+
+                parent_group.children.remove(item_ref)
+                items_to_delete.append(item)
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -339,9 +407,11 @@ class DoclingIngester:
                 current_annex = None
                 continue
             last = headings[-1]
-            if re.match(r"^Anexa\s+\d+\.?", last):
+            if _ANNEX_PATTERN.match(last):
                 current_annex = last
-            elif current_annex and re.match(r"^Articolul\s+\d+", last):
+            elif current_annex and any(p.match(last) for p in _HEADING_PATTERNS):
+                if len(headings) == 1 or headings[0] != current_annex:
+                    node.metadata["headings"] = [current_annex] + headings
                 if len(headings) == 1 or headings[0] != current_annex:
                     node.metadata["headings"] = [current_annex] + headings
             else:
