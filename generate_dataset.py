@@ -17,9 +17,19 @@ from ragas.run_config import RunConfig
 from ragas.testset import TestsetGenerator
 from ragas.testset.graph import KnowledgeGraph, Node, NodeType
 from ragas.testset.persona import Persona
-from ragas.testset.synthesizers import SingleHopSpecificQuerySynthesizer, MultiHopSpecificQuerySynthesizer, MultiHopAbstractQuerySynthesizer
-from ragas.testset.transforms import Parallel, apply_transforms, default_transforms_for_prechunked
-from ragas.testset.transforms.extractors import EmbeddingExtractor, NERExtractor, SummaryExtractor
+from app.synthesizers import (
+    CustomSingleHopSpecificQuerySynthesizer,
+    CustomMultiHopSpecificQuerySynthesizer,
+    CustomMultiHopAbstractQuerySynthesizer,
+)
+from ragas.testset.transforms import apply_transforms, default_transforms_for_prechunked
+
+from app.prompts import (
+    extract_faculty_name,
+    build_single_hop_prompt,
+    build_multi_hop_specific_prompt,
+    build_multi_hop_abstract_prompt,
+)
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO, force=True)
 
@@ -52,8 +62,9 @@ def build_chunks(docs_path: Path) -> list:
 def setup_llm(llm_model: str | None = None, llm_base_url: str | None = None):
     model = llm_model or _LLM_MODEL
     url = llm_base_url or _LLM_BASE_URL
+    key = os.getenv("API_KEY")
     client = AsyncOpenAI(
-        api_key="EMPTY",
+        api_key=key,
         base_url=url,
         timeout=120.0,
         max_retries=3,
@@ -61,7 +72,7 @@ def setup_llm(llm_model: str | None = None, llm_base_url: str | None = None):
     ragas_llm = llm_factory(
         model,
         client=client,
-        max_tokens=4096,
+        max_tokens=16000,
     )
     logging.info("LLM ready (%s) via llm_factory.", model)
     return ragas_llm
@@ -192,10 +203,19 @@ def main():
 
     run_config = RunConfig(max_workers=max_workers)
 
+    single_synth = CustomSingleHopSpecificQuerySynthesizer(llm=ragas_llm)
+    single_synth.generate_query_reference_prompt = build_single_hop_prompt()
+
+    multi_synth = CustomMultiHopSpecificQuerySynthesizer(llm=ragas_llm)
+    multi_synth.generate_query_reference_prompt = build_multi_hop_specific_prompt()
+
+    abstract_synth = CustomMultiHopAbstractQuerySynthesizer(llm=ragas_llm)
+    abstract_synth.generate_query_reference_prompt = build_multi_hop_abstract_prompt()
+
     query_distribution = [
-        (SingleHopSpecificQuerySynthesizer(llm=ragas_llm), 0.5),
-        (MultiHopSpecificQuerySynthesizer(llm=ragas_llm), 0.3),
-        (MultiHopAbstractQuerySynthesizer(llm=ragas_llm), 0.2)
+        (single_synth, 0.5),
+        (multi_synth, 0.3),
+        (abstract_synth, 0.2),
     ]
 
     # ── Generate ──────────────────────────────────────────────────────────
@@ -219,11 +239,16 @@ def main():
             page_content = chunk.get_content()
             metadata = chunk.metadata or {}
             if page_content is not None and page_content.strip() != "":
+                headings = metadata.get("headings", [])
+                if headings:
+                    heading_context = " > ".join(headings)
+                    page_content = f"{heading_context}\n\n{page_content}"
                 node = Node(
                     type=NodeType.CHUNK,
                     properties={
                         "page_content": page_content,
                         "document_metadata": metadata,
+                        "faculty_name": extract_faculty_name(metadata),
                     },
                 )
                 nodes.append(node)
