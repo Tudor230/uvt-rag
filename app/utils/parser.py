@@ -19,33 +19,37 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_CHUNK_TOKENS = 1024
 
+# Matches "Articolul X", "Article X", "Art. X" — article headings
 _ARTICLE_PATTERN = re.compile(
     r"^(?:Articolul|Article|Art\.?)\s+\d[\d\s]*(?:\s*\.)?(?=\s|[A-Z]|$)",
     re.IGNORECASE,
 )
+# Matches "Anexa Nr. X" or "Annex X" — annex headings
 _ANNEX_PATTERN = re.compile(
     r"^(?:Anexa|Annex)\s+(?:Nr\s*\.\s+)?\d+\.?",
     re.IGNORECASE,
 )
 
+# Each pattern matches a heading line to promote from TEXT/LIST_ITEM to SECTION_HEADER.
 _HEADING_PATTERNS = [
-    _ARTICLE_PATTERN,
-    re.compile(r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+", re.IGNORECASE),
-    _ANNEX_PATTERN,
-    re.compile(r"^CAPITOLUL\s", re.IGNORECASE),
-    re.compile(r"^SECȚIUNEA\s+[IVXL]+", re.IGNORECASE),
-    re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),
-    re.compile(r"^[IVXL]+\.(?:\s*\d+\s*\.)?\s+[A-Z\sȘȚĂÎÂ\-]+"),
-    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+", re.IGNORECASE),
-    re.compile(r"^Regulamentul\s+privind\s+", re.IGNORECASE),
+    _ARTICLE_PATTERN,                         # "Articolul X" / "Article X" / "Art. X"
+    re.compile(                               # "(N) Program(ul/ele) de studii universitare de licență"
+        r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+", re.IGNORECASE),
+    _ANNEX_PATTERN,                           # "Anexa Nr. X" / "Annex X"
+    re.compile(r"^CAPITOLUL\s", re.IGNORECASE),  # "CAPITOLUL X"
+    re.compile(r"^SECȚIUNEA\s+[IVXL]+", re.IGNORECASE),  # "SECȚIUNEA I/II/III..."
+    re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),          # "A) TITLE" lettered list headings
+    re.compile(r"^[IVXL]+\.(?:\s*\d+\s*\.)?\s+[A-Z\sȘȚĂÎÂ\-]+"),  # "I. 1. TITLE" roman-numeral headings
+    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+", re.IGNORECASE),  # "X. METODOLOGIA DE DESFĂȘURARE..."
 ]
 
+# Deletes running page headers matching "Regulamentul Facultății de..." from items
 _PAGE_HEADER_PATTERNS = [
     re.compile(r"^Regulamentul\s+Facultății\s+de\s+", re.IGNORECASE),
 ]
 
-# Catches orphaned running header continuation fragments at y > 680
-# (e.g. "organizarea și desfășurarea") regardless of split boundaries.
+# Catches orphaned running-header continuation fragments at y > 680
+# (e.g. "privind organizarea și desfășurarea" or "procesului de admitere pentru")
 _RH_CONTINUATION_RE = re.compile(
     r"^(?:privind\s+)?(?:"
     r"organizarea\s+și\s+desfășurarea"
@@ -57,21 +61,35 @@ _RH_CONTINUATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Post-chunk cleanup: removes leftover "Regulamentul Facultății de [...] privind [...]" running headers
 _RUNNING_HEADER_RE = re.compile(
     r"(?:^|\n|(?<=[.!?])\s)Regulamentul\s+Facultății\s+de\s+"
     r"(?:.*?studii\s+de\s+licență|.*?privind(?:\s|$))",
     re.IGNORECASE | re.DOTALL,
 )
 
+# Post-chunk cleanup: removes fragmented "pagina\nX\ndin\nY" page numbers split across lines
 _PAGE_NUM_FRAGMENTED_RE = re.compile(
     r"(?:^|\n)pagina\s*\n\d+\s*\ndin\s*\n\d+",
     re.IGNORECASE,
 )
 
+# Post-chunk cleanup: removes "nr. anexe <number>" references
 _NR_ANNEX_RE = re.compile(
     r"\bnr\.?\s+anexe\s+\d+\b",
     re.IGNORECASE,
 )
+
+# Strips "pagina X din Y" from item text (inline page number within running text)
+_PAGE_NUM_STRIP_RE = re.compile(r"(?i)pagina\s+\d+\s+din\s+\d+")
+
+# Detects footer page number variants at y > 680: "pagina X", "X din Y", or "pagina X din"
+_FOOTER_PAGE_NUM_RE = re.compile(
+    r"(?i)^(?:pagina(?:\s+\d+(?:\s+din)?)?|\d+\s+din\s+\d+|pagina\s+\d+\s+din\s*)$",
+)
+
+# Detects "nr. anexe" in footer area at y > 680
+_FOOTER_NR_ANNEXE_RE = re.compile(r"(?i)^nr\.?\s+anexe")
 
 
 class DoclingIngester:
@@ -140,7 +158,9 @@ class DoclingIngester:
         from collections import defaultdict
 
         page_items = defaultdict(list)
-        child_info = []
+        prov_items = []  # (child, idx, page, y, x)
+        no_prov_children = []  # (child, idx)
+
         for idx, child in enumerate(children):
             ref = child.get("$ref", "")
             item = items_by_ref.get(ref, {})
@@ -149,17 +169,26 @@ class DoclingIngester:
                 page = p.get("page_no", 0) or 0
                 y = p.get("bbox", {}).get("t", 0)
                 x = p.get("bbox", {}).get("l", 0)
+                prov_items.append((child, idx, page, y, x))
+                page_items[page].append((idx, y, x))
             else:
-                page, y, x = 0, 0, 0
-            child_info.append((child, page, y, x))
-            page_items[page].append((idx, y, x))
+                no_prov_children.append((child, idx))
 
         two_column_pages = set()
         for page, items in page_items.items():
-            for i in range(len(items)):
-                y1, x1 = items[i][1], items[i][2]
-                for j in range(i + 1, len(items)):
-                    y2, x2 = items[j][1], items[j][2]
+            filtered = []
+            for idx, y, x in items:
+                ref = children[idx].get("$ref", "")
+                item = items_by_ref.get(ref, {})
+                label = item.get("label", "")
+                text = (item.get("text", "") or "").strip()
+                if label in ("picture", "table") or not text:
+                    continue
+                filtered.append((idx, y, x))
+            for i in range(len(filtered)):
+                y1, x1 = filtered[i][1], filtered[i][2]
+                for j in range(i + 1, len(filtered)):
+                    y2, x2 = filtered[j][1], filtered[j][2]
                     if abs(y1 - y2) <= 2 and abs(x1 - x2) > 150:
                         two_column_pages.add(page)
                         break
@@ -167,18 +196,28 @@ class DoclingIngester:
                     break
 
         def _sort_key(info):
-            _, page, y, x = info
+            child, idx, page, y, x = info
             if page in two_column_pages:
                 pg_items = page_items[page]
                 min_x = min(it[2] for it in pg_items)
                 max_x = max(it[2] for it in pg_items)
                 mid_x = (min_x + max_x) / 2
                 col = 0 if x < mid_x else 1
-                return (page, col, -y)
-            return (page, -y, x)
+                return (page, col, -y, idx)
+            return (page, -y, x, idx)
 
-        child_info.sort(key=_sort_key)
-        doc_dict["body"]["children"] = [info[0] for info in child_info]
+        prov_items.sort(key=_sort_key)
+
+        result = [None] * len(children)
+        for child, idx in no_prov_children:
+            result[idx] = child
+
+        prov_iter = iter(prov_items)
+        for i in range(len(children)):
+            if result[i] is None:
+                result[i] = next(prov_iter)[0]
+
+        doc_dict["body"]["children"] = result
 
         return doc_dict
 
@@ -217,11 +256,8 @@ class DoclingIngester:
             for item, level in dl_doc.iterate_items():
                 if hasattr(item, "text") and isinstance(item.text, str):
                     original_text = item.text
-                    cleaned_text = re.sub(r"(?i)pagina\s+\d+\s+din\s+\d+", "", original_text).strip()
+                    cleaned_text = _PAGE_NUM_STRIP_RE.sub("", original_text).strip()
                     item.text = cleaned_text
-                    if re.match(r"(?i)^\s*pagina\s+\d+\s+din\s+\d+\s*$", original_text):
-                        items_to_delete.append(item)
-                        continue
 
                 text = getattr(item, "text", "").strip()
                 is_running_header = any(p.match(text) for p in _PAGE_HEADER_PATTERNS)
@@ -238,10 +274,10 @@ class DoclingIngester:
                     if _RH_CONTINUATION_RE.match(text):
                         items_to_delete.append(item)
                         continue
-                    if re.match(r"(?i)^(?:pagina(?:\s+\d+(?:\s+din)?)?|\d+\s+din\s+\d+|pagina\s+\d+\s+din\s*)$", text):
+                    if _FOOTER_PAGE_NUM_RE.match(text):
                         items_to_delete.append(item)
                         continue
-                    if re.match(r"(?i)^nr\.?\s+anexe", text):
+                    if _FOOTER_NR_ANNEXE_RE.match(text):
                         items_to_delete.append(item)
                         continue
 
@@ -310,7 +346,7 @@ class DoclingIngester:
                     logger.debug("Skipping native deletion for item due to tree structure constraints: %s", e)
 
             # 3. Split groups at heading boundaries
-            for item, heading_text, remaining, parent_group in heading_candidates:
+            for item, heading_text, remaining, parent_group in reversed(heading_candidates):
                 item_ref = item.get_ref()
                 pos = next(
                     (i for i, c in enumerate(parent_group.children) if c == item_ref),
