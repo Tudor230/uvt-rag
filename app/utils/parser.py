@@ -105,6 +105,7 @@ class DoclingIngester:
         self.pipeline_options.do_formula_enrichment = True
         self.pipeline_options.ocr_options = EasyOcrOptions(lang=["ro", "en"], use_gpu=True)
         self.pipeline_options.images_scale = 2.0
+        self.pipeline_options.generate_parsed_pages = True
         self._docs_dir = Path(docs_dir)
         self._doc_converter = doc_converter or DocumentConverter(
             format_options={
@@ -237,6 +238,27 @@ class DoclingIngester:
             result = self._doc_converter.convert(path)
             dl_doc = result.document
             heading_candidates = []
+
+            # Extract page heights and raw hyperlinks from parsed pages
+            _page_heights = {}
+            _page_hls = {}
+            for p in result.pages:
+                if p.size:
+                    _page_heights[p.page_no] = p.size.height
+                parsed = getattr(p, 'parsed_page', None)
+                if parsed and parsed.hyperlinks:
+                    h = _page_heights.get(p.page_no)
+                    if h:
+                        links = []
+                        for hl in parsed.hyperlinks:
+                            if hl.uri:
+                                bbox = hl.rect.to_bounding_box().to_top_left_origin(h)
+                                links.append((str(hl.uri), bbox))
+                        if links:
+                            _page_hls[p.page_no] = links
+            if _page_hls:
+                total = sum(len(v) for v in _page_hls.values())
+                logger.info("Extracted %d hyperlinks from parsed pages for %s", total, path.name)
 
             if (self.debug == True):
                 inspection_data = []
@@ -401,15 +423,79 @@ class DoclingIngester:
 
             doc_dict = self._reorder_body_children(doc_dict)
             llama_doc = Document(text=json.dumps(doc_dict))
-            documents.append(llama_doc)
 
-        logger.info("Parsing documents with DoclingNodeParser ...")
-        nodes = self._node_parser.get_nodes_from_documents(documents)
-        logger.info("Produced %d nodes.", len(nodes))
+            # Chunk this single document
+            nodes = self._node_parser.get_nodes_from_documents([llama_doc])
+
+            # Attach hyperlinks for this document's chunks
+            _HL_URL_RE = re.compile(r'(https?://(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s,.!?;)\]]*)?)', re.IGNORECASE)
+            _HL_WWW_RE = re.compile(r'(www\.[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s,.!?;)\]]*)?)', re.IGNORECASE)
+            _HL_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
+            for node in nodes:
+                content = node.get_content()
+                hyperlinks = []
+                seen = set()
+                for m in _HL_URL_RE.finditer(content):
+                    url = m.group(0)
+                    hyperlinks.append({"text": url, "url": url})
+                    seen.add(url)
+                for m in _HL_WWW_RE.finditer(content):
+                    url = m.group(0)
+                    if url not in seen:
+                        hyperlinks.append({"text": url, "url": f"http://{url}"})
+                        seen.add(url)
+                for m in _HL_EMAIL_RE.finditer(content):
+                    email = m.group(0)
+                    if email not in seen:
+                        hyperlinks.append({"text": email, "url": f"mailto:{email}"})
+                        seen.add(email)
+                if _page_hls:
+                    for doc_item in node.metadata.get("doc_items", []):
+                        for prov in doc_item.get("prov", []):
+                            pno = prov.get("page_no")
+                            if pno not in _page_hls:
+                                continue
+                            for uri_str, _ in _page_hls[pno]:
+                                if uri_str in seen:
+                                    continue
+                                from urllib.parse import urlparse, unquote
+                                parsed = urlparse(uri_str)
+                                norm = re.sub(r'\s+', ' ', content)
+                                anchor = uri_str
+                                if parsed.hostname:
+                                    host = parsed.hostname
+                                    if host in norm:
+                                        anchor = host
+                                    path = unquote(parsed.path.rstrip('/'))
+                                    for seg in reversed(path.split('/')):
+                                        if not seg:
+                                            continue
+                                        clean = re.sub(r'\s+', ' ', seg.replace('_', ' ').replace('-', ' ').replace('.pdf', '').strip())
+                                        for end in range(len(clean.split()), 0, -1):
+                                            phrase = ' '.join(clean.split()[:end])
+                                            if phrase and phrase in norm:
+                                                anchor = phrase
+                                                break
+                                        if anchor != host:
+                                            break
+                                hyperlinks.append({"text": anchor.strip(), "url": uri_str})
+                                seen.add(uri_str)
+                if hyperlinks:
+                    node.metadata["hyperlinks"] = hyperlinks
+
+            documents.append((path, nodes))
+
+        logger.info("Chunking done. Processing %d documents...", len(documents))
+
+        # Collect all nodes and post-process
+        all_nodes = []
+        for _path, nodes in documents:
+            all_nodes.extend(nodes)
+
+        logger.info("Produced %d nodes.", len(all_nodes))
 
         # Post-process: remove running page headers and fragmented page numbers
-        # that weren't caught pre-chunking (e.g. OCR-merged or split across items)
-        for node in nodes:
+        for node in all_nodes:
             content = node.get_content()
             new_content = _RUNNING_HEADER_RE.sub("\n", content)
             new_content = _PAGE_NUM_FRAGMENTED_RE.sub("\n", new_content)
@@ -417,10 +503,10 @@ class DoclingIngester:
             if new_content != content:
                 node.text = new_content
 
-        # Post-process: promote headings from empty chunks to the next chunk
+        # Promote headings from empty chunks to the next chunk
         _filtered = []
         pending_headings = []
-        for node in nodes:
+        for node in all_nodes:
             content = node.get_content().strip()
             is_empty = len(content) < 10
             node_headings = node.metadata.get("headings", [])
@@ -435,7 +521,7 @@ class DoclingIngester:
         if pending_headings:
             logger.debug("Dropping %d trailing empty heading(s): %s", len(pending_headings), pending_headings)
 
-        # Nest articles under their parent annex in the heading hierarchy
+        # Nest articles under their parent annex
         current_annex = None
         for node in _filtered:
             headings = node.metadata.get("headings", [])
