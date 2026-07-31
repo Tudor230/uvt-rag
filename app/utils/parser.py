@@ -3,93 +3,27 @@ import logging
 import warnings
 from pathlib import Path
 from typing import Optional
-import re
 
 from docling.chunking import HybridChunker, BaseChunker
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
+from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 from llama_index.readers.docling import DoclingReader
 from llama_index.node_parser.docling import DoclingNodeParser
 from llama_index.core.schema import TextNode, Document
-from docling_core.types.doc.labels import DocItemLabel
-from docling_core.types.doc.document import RefItem, TextItem
+
+from app.utils.postprocessing import GLOBAL_STEPS, AttachHyperlinks
+from app.utils.preprocessing import (
+    DEFERRED_STEPS,
+    DICT_STEPS,
+    ITEM_STEPS,
+    PreprocessContext,
+)
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHUNK_TOKENS = 1024
-
-# Matches "Articolul X", "Article X", "Art. X" — article headings
-_ARTICLE_PATTERN = re.compile(
-    r"^(?:Articolul|Article|Art\.?)\s+\d[\d\s]*(?:\s*\.)?(?=\s|[A-Z]|$)",
-    re.IGNORECASE,
-)
-# Matches "Anexa Nr. X" or "Annex X" — annex headings
-_ANNEX_PATTERN = re.compile(
-    r"^(?:Anexa|Annex)\s+(?:Nr\s*\.\s+)?\d+\.?",
-    re.IGNORECASE,
-)
-
-# Each pattern matches a heading line to promote from TEXT/LIST_ITEM to SECTION_HEADER.
-_HEADING_PATTERNS = [
-    _ARTICLE_PATTERN,                         # "Articolul X" / "Article X" / "Art. X"
-    re.compile(                               # "(N) Program(ul/ele) de studii universitare de licență"
-        r"^(?:\(\d+\)\s+)?Program(ul|ele)\s+de\s+studii\s+universitare\s+de\s+licență.+", re.IGNORECASE),
-    _ANNEX_PATTERN,                           # "Anexa Nr. X" / "Annex X"
-    re.compile(r"^CAPITOLUL\s", re.IGNORECASE),  # "CAPITOLUL X"
-    re.compile(r"^SECȚIUNEA\s+[IVXL]+", re.IGNORECASE),  # "SECȚIUNEA I/II/III..."
-    re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),          # "A) TITLE" lettered list headings
-    re.compile(r"^[IVXL]+\.(?:\s*\d+\s*\.)?\s+[A-Z\sȘȚĂÎÂ\-]+"),  # "I. 1. TITLE" roman-numeral headings
-    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+", re.IGNORECASE),  # "X. METODOLOGIA DE DESFĂȘURARE..."
-]
-
-# Deletes running page headers matching "Regulamentul Facultății de..." from items
-_PAGE_HEADER_PATTERNS = [
-    re.compile(r"^Regulamentul\s+Facultății\s+de\s+", re.IGNORECASE),
-]
-
-# Catches orphaned running-header continuation fragments at y > 680
-# (e.g. "privind organizarea și desfășurarea" or "procesului de admitere pentru")
-_RH_CONTINUATION_RE = re.compile(
-    r"^(?:privind\s+)?(?:"
-    r"organizarea\s+și\s+desfășurarea"
-    r"|procesului\s+de\s+admitere\s+pentru"
-    r"|programele\s+de\s+studii"
-    r"|universitare\s+de\s+la\s+ciclul\s+de"
-    r"|studii\s+de\s+licență"
-    r")$",
-    re.IGNORECASE,
-)
-
-# Post-chunk cleanup: removes leftover "Regulamentul Facultății de [...] privind [...]" running headers
-_RUNNING_HEADER_RE = re.compile(
-    r"(?:^|\n|(?<=[.!?])\s)Regulamentul\s+Facultății\s+de\s+"
-    r"(?:.*?studii\s+de\s+licență|.*?privind(?:\s|$))",
-    re.IGNORECASE | re.DOTALL,
-)
-
-# Post-chunk cleanup: removes fragmented "pagina\nX\ndin\nY" page numbers split across lines
-_PAGE_NUM_FRAGMENTED_RE = re.compile(
-    r"(?:^|\n)pagina\s*\n\d+\s*\ndin\s*\n\d+",
-    re.IGNORECASE,
-)
-
-# Post-chunk cleanup: removes "nr. anexe <number>" references
-_NR_ANNEX_RE = re.compile(
-    r"\bnr\.?\s+anexe\s+\d+\b",
-    re.IGNORECASE,
-)
-
-# Strips "pagina X din Y" from item text (inline page number within running text)
-_PAGE_NUM_STRIP_RE = re.compile(r"(?i)pagina\s+\d+\s+din\s+\d+")
-
-# Detects footer page number variants at y > 680: "pagina X", "X din Y", or "pagina X din"
-_FOOTER_PAGE_NUM_RE = re.compile(
-    r"(?i)^(?:pagina(?:\s+\d+(?:\s+din)?)?|\d+\s+din\s+\d+|pagina\s+\d+\s+din\s*)$",
-)
-
-# Detects "nr. anexe" in footer area at y > 680
-_FOOTER_NR_ANNEXE_RE = re.compile(r"(?i)^nr\.?\s+anexe")
 
 
 class DoclingIngester:
@@ -127,101 +61,6 @@ class DoclingIngester:
 
         self._node_parser = DoclingNodeParser(chunker=chunker)
 
-    @staticmethod
-    def _reorder_body_children(doc_dict: dict) -> dict:
-        items_by_ref = {}
-        for category in ("texts", "tables", "pictures", "groups"):
-            for item in doc_dict.get(category, []):
-                items_by_ref[item["self_ref"]] = item
-
-        def _first_prov(item: dict):
-            prov = item.get("prov", [])
-            if isinstance(prov, list) and prov:
-                return prov[0]
-            queue = list(item.get("children", []))
-            while queue:
-                child_ref_dict = queue.pop(0)
-                child_ref = child_ref_dict.get("$ref", child_ref_dict) if isinstance(child_ref_dict, dict) else child_ref_dict
-                child = items_by_ref.get(child_ref, {})
-                prov = child.get("prov", [])
-                if isinstance(prov, list) and prov:
-                    return prov[0]
-                grandchildren = child.get("children", [])
-                if grandchildren:
-                    queue.extend(grandchildren)
-            return None
-
-        if "body" not in doc_dict or "children" not in doc_dict["body"]:
-            return doc_dict
-
-        children = doc_dict["body"]["children"]
-
-        from collections import defaultdict
-
-        page_items = defaultdict(list)
-        prov_items = []  # (child, idx, page, y, x)
-        no_prov_children = []  # (child, idx)
-
-        for idx, child in enumerate(children):
-            ref = child.get("$ref", "")
-            item = items_by_ref.get(ref, {})
-            p = _first_prov(item)
-            if p:
-                page = p.get("page_no", 0) or 0
-                y = p.get("bbox", {}).get("t", 0)
-                x = p.get("bbox", {}).get("l", 0)
-                prov_items.append((child, idx, page, y, x))
-                page_items[page].append((idx, y, x))
-            else:
-                no_prov_children.append((child, idx))
-
-        two_column_pages = set()
-        for page, items in page_items.items():
-            filtered = []
-            for idx, y, x in items:
-                ref = children[idx].get("$ref", "")
-                item = items_by_ref.get(ref, {})
-                label = item.get("label", "")
-                text = (item.get("text", "") or "").strip()
-                if label in ("picture", "table") or not text:
-                    continue
-                filtered.append((idx, y, x))
-            for i in range(len(filtered)):
-                y1, x1 = filtered[i][1], filtered[i][2]
-                for j in range(i + 1, len(filtered)):
-                    y2, x2 = filtered[j][1], filtered[j][2]
-                    if abs(y1 - y2) <= 2 and abs(x1 - x2) > 150:
-                        two_column_pages.add(page)
-                        break
-                if page in two_column_pages:
-                    break
-
-        def _sort_key(info):
-            child, idx, page, y, x = info
-            if page in two_column_pages:
-                pg_items = page_items[page]
-                min_x = min(it[2] for it in pg_items)
-                max_x = max(it[2] for it in pg_items)
-                mid_x = (min_x + max_x) / 2
-                col = 0 if x < mid_x else 1
-                return (page, col, -y, idx)
-            return (page, -y, x, idx)
-
-        prov_items.sort(key=_sort_key)
-
-        result = [None] * len(children)
-        for child, idx in no_prov_children:
-            result[idx] = child
-
-        prov_iter = iter(prov_items)
-        for i in range(len(children)):
-            if result[i] is None:
-                result[i] = next(prov_iter)[0]
-
-        doc_dict["body"]["children"] = result
-
-        return doc_dict
-
     def ingest(self) -> list[TextNode]:
         pdf_paths = sorted(self._docs_dir.glob("*.pdf"))
         if not pdf_paths:
@@ -229,317 +68,68 @@ class DoclingIngester:
             return []
 
         logger.info("Loading %d PDFs from %s with DoclingReader ...", len(pdf_paths), self._docs_dir)
-        # documents = list(self._reader.load_data(file_path=pdf_paths))
-        # logger.info("Loaded %d documents.", len(documents))
         documents = []
         items_to_delete = []
         for path in pdf_paths:
             # 1. Parse the document natively with Docling
             result = self._doc_converter.convert(path)
             dl_doc = result.document
-            heading_candidates = []
 
-            # Extract page heights and raw hyperlinks from parsed pages
-            _page_heights = {}
-            _page_hls = {}
-            for p in result.pages:
-                if p.size:
-                    _page_heights[p.page_no] = p.size.height
-                parsed = getattr(p, 'parsed_page', None)
-                if parsed and parsed.hyperlinks:
-                    h = _page_heights.get(p.page_no)
-                    if h:
-                        links = []
-                        for hl in parsed.hyperlinks:
-                            if hl.uri:
-                                bbox = hl.rect.to_bounding_box().to_top_left_origin(h)
-                                links.append((str(hl.uri), bbox))
-                        if links:
-                            _page_hls[p.page_no] = links
-            if _page_hls:
-                total = sum(len(v) for v in _page_hls.values())
-                logger.info("Extracted %d hyperlinks from parsed pages for %s", total, path.name)
-
-            if (self.debug == True):
+            if self.debug:
                 inspection_data = []
-                
+
                 for item, level in dl_doc.iterate_items():
                     item_dict = item.model_dump(exclude_none=True, mode="json")
-                    
-                    item_dict["_docling_level"] = level 
-                    
+
+                    item_dict["_docling_level"] = level
+
                     inspection_data.append(item_dict)
-                
+
                 export_path = path.with_name(f"{path.stem}_inspection.json")
                 with open(export_path, "w", encoding="utf-8") as f:
                     json.dump(inspection_data, f, indent=2)
-            
-            # 2. Intercept and fix misclassified layout elements
+
+            # 2. Pre-process: intercept and fix misclassified layout elements
+            ctx = PreprocessContext(dl_doc, items_to_delete)
             for item, level in dl_doc.iterate_items():
-                if hasattr(item, "text") and isinstance(item.text, str):
-                    original_text = item.text
-                    cleaned_text = _PAGE_NUM_STRIP_RE.sub("", original_text).strip()
-                    item.text = cleaned_text
+                for step in ITEM_STEPS:
+                    if step.apply(item, ctx):
+                        break
+            for step in DEFERRED_STEPS:
+                step.apply(ctx)
 
-                text = getattr(item, "text", "").strip()
-                is_running_header = any(p.match(text) for p in _PAGE_HEADER_PATTERNS)
-                if is_running_header:
-                    items_to_delete.append(item)
-                    continue
-
-                try:
-                    y = item.prov[0].bbox.t
-                except (IndexError, AttributeError):
-                    y = None
-
-                if y is not None and y > 680:
-                    if _RH_CONTINUATION_RE.match(text):
-                        items_to_delete.append(item)
-                        continue
-                    if _FOOTER_PAGE_NUM_RE.match(text):
-                        items_to_delete.append(item)
-                        continue
-                    if _FOOTER_NR_ANNEXE_RE.match(text):
-                        items_to_delete.append(item)
-                        continue
-
-                is_heading = any(p.match(text) for p in _HEADING_PATTERNS)
-
-                if is_heading and item.label in (DocItemLabel.TEXT, DocItemLabel.LIST_ITEM):
-                    heading_text = text
-                    remaining = ""
-                    if "\n" in text:
-                        heading_text, _, remaining = text.partition("\n")
-                        heading_text = heading_text.strip()
-                        remaining = remaining.strip()
-                    else:
-                        for p in _HEADING_PATTERNS:
-                            m = p.match(text)
-                            if m and m.end() < len(text):
-                                heading_text = m.group(0).strip()
-                                remaining = text[m.end():].strip()
-                                break
-
-                    parent_cref = item.parent.cref if item.parent else None
-                    if parent_cref and parent_cref != "#/body":
-                        parent_group = next(
-                            (g for g in dl_doc.groups if g.self_ref == parent_cref),
-                            None,
-                        )
-                        if parent_group is not None:
-                            heading_candidates.append(
-                                (item, heading_text, remaining, parent_group)
-                            )
-                            continue
-
-                    dl_doc.add_heading(
-                        text=heading_text,
-                        prov=item.prov[0] if item.prov else None,
-                        parent=dl_doc.body,
-                    )
-                    if remaining:
-                        dl_doc.add_text(
-                            label=item.label,
-                            text=remaining,
-                            prov=item.prov[0] if item.prov else None,
-                            parent=dl_doc.body,
-                        )
-                    items_to_delete.append(item)
-                    continue
-
-                if item.label is DocItemLabel.SECTION_HEADER and not is_heading:
-                    dl_doc.add_text(
-                        label=DocItemLabel.TEXT,
-                        text=text,
-                        prov=item.prov[0] if item.prov else None,
-                        parent=dl_doc.body,
-                    )
-                    items_to_delete.append(item)
-
-            for target_item in reversed(items_to_delete):
-                try:
-                    dl_doc.delete_items_range(
-                        start=target_item,
-                        end=target_item,
-                        start_inclusive=True,
-                        end_inclusive=True
-                    )
-                except Exception as e:
-                    logger.debug("Skipping native deletion for item due to tree structure constraints: %s", e)
-
-            # 3. Split groups at heading boundaries
-            for item, heading_text, remaining, parent_group in reversed(heading_candidates):
-                item_ref = item.get_ref()
-                pos = next(
-                    (i for i, c in enumerate(parent_group.children) if c == item_ref),
-                    None,
-                )
-                if pos is None:
-                    continue
-
-                after_refs = parent_group.children[pos + 1 :]
-
-                h = dl_doc.insert_heading(
-                    sibling=parent_group,
-                    text=heading_text,
-                    prov=item.prov[0] if item.prov else None,
-                    after=True,
-                )
-
-                sib = h
-                if remaining:
-                    sib = dl_doc.insert_text(
-                        sibling=h,
-                        label=DocItemLabel.TEXT,
-                        text=remaining,
-                        prov=item.prov[0] if item.prov else None,
-                        after=True,
-                    )
-
-                new_group = dl_doc.insert_list_group(sibling=sib, after=True)
-
-                for child_ref in after_refs:
-                    child_item = child_ref.resolve(dl_doc)
-                    parent_group.children.remove(child_ref)
-                    new_group.children.append(child_ref)
-                    child_item.parent = RefItem(cref=new_group.self_ref)
-
-                parent_group.children.remove(item_ref)
-                items_to_delete.append(item)
-
+            # 3. Export and post-process the doc dict
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 doc_dict = dl_doc.export_to_dict()
 
-            refs_in_tree = {c.get("$ref", "") for c in doc_dict.get("body", {}).get("children", [])}
-            for item in doc_dict.get("texts", []):
-                item.pop("level", None)
-                item.pop("enumerated", None)
-                item.pop("marker", None)
-                if item["self_ref"] not in refs_in_tree and item.get("label") == "section_header":
-                    item["label"] = "text"
-            for group in doc_dict.get("groups", []):
-                group.pop("level", None)
+            for step in DICT_STEPS:
+                doc_dict = step.apply(doc_dict)
 
-            doc_dict = self._reorder_body_children(doc_dict)
             llama_doc = Document(text=json.dumps(doc_dict))
 
-            # Chunk this single document
+            # 4. Chunk this single document
             nodes = self._node_parser.get_nodes_from_documents([llama_doc])
 
-            # Attach hyperlinks for this document's chunks
-            _HL_URL_RE = re.compile(r'(https?://(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s,.!?;)\]]*)?)', re.IGNORECASE)
-            _HL_WWW_RE = re.compile(r'(www\.[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s,.!?;)\]]*)?)', re.IGNORECASE)
-            _HL_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
-            for node in nodes:
-                content = node.get_content()
-                hyperlinks = []
-                seen = set()
-                for m in _HL_URL_RE.finditer(content):
-                    url = m.group(0)
-                    hyperlinks.append({"text": url, "url": url})
-                    seen.add(url)
-                for m in _HL_WWW_RE.finditer(content):
-                    url = m.group(0)
-                    if url not in seen:
-                        hyperlinks.append({"text": url, "url": f"http://{url}"})
-                        seen.add(url)
-                for m in _HL_EMAIL_RE.finditer(content):
-                    email = m.group(0)
-                    if email not in seen:
-                        hyperlinks.append({"text": email, "url": f"mailto:{email}"})
-                        seen.add(email)
-                if _page_hls:
-                    for doc_item in node.metadata.get("doc_items", []):
-                        for prov in doc_item.get("prov", []):
-                            pno = prov.get("page_no")
-                            if pno not in _page_hls:
-                                continue
-                            for uri_str, _ in _page_hls[pno]:
-                                if uri_str in seen:
-                                    continue
-                                from urllib.parse import urlparse, unquote
-                                parsed = urlparse(uri_str)
-                                norm = re.sub(r'\s+', ' ', content)
-                                anchor = uri_str
-                                if parsed.hostname:
-                                    host = parsed.hostname
-                                    if host in norm:
-                                        anchor = host
-                                    path = unquote(parsed.path.rstrip('/'))
-                                    for seg in reversed(path.split('/')):
-                                        if not seg:
-                                            continue
-                                        clean = re.sub(r'\s+', ' ', seg.replace('_', ' ').replace('-', ' ').replace('.pdf', '').strip())
-                                        for end in range(len(clean.split()), 0, -1):
-                                            phrase = ' '.join(clean.split()[:end])
-                                            if phrase and phrase in norm:
-                                                anchor = phrase
-                                                break
-                                        if anchor != host:
-                                            break
-                                hyperlinks.append({"text": anchor.strip(), "url": uri_str})
-                                seen.add(uri_str)
-                if hyperlinks:
-                    node.metadata["hyperlinks"] = hyperlinks
+            # 5. Attach hyperlinks for this document's chunks
+            nodes = AttachHyperlinks().apply(nodes, result, path.name)
 
             documents.append((path, nodes))
 
         logger.info("Chunking done. Processing %d documents...", len(documents))
 
-        # Collect all nodes and post-process
+        # Collect all nodes
         all_nodes = []
         for _path, nodes in documents:
             all_nodes.extend(nodes)
 
         logger.info("Produced %d nodes.", len(all_nodes))
 
-        # Post-process: remove running page headers and fragmented page numbers
-        for node in all_nodes:
-            content = node.get_content()
-            new_content = _RUNNING_HEADER_RE.sub("\n", content)
-            new_content = _PAGE_NUM_FRAGMENTED_RE.sub("\n", new_content)
-            new_content = _NR_ANNEX_RE.sub("", new_content)
-            if new_content != content:
-                node.text = new_content
+        # 6. Post-process the chunk collection
+        for step in GLOBAL_STEPS:
+            all_nodes = step.apply(all_nodes)
 
-        # Promote headings from empty chunks to the next chunk
-        _filtered = []
-        pending_headings = []
-        for node in all_nodes:
-            content = node.get_content().strip()
-            is_empty = len(content) < 10
-            node_headings = node.metadata.get("headings", [])
-            if is_empty:
-                pending_headings.extend(node_headings)
-            else:
-                if pending_headings:
-                    node.metadata["headings"] = pending_headings + node_headings
-                    pending_headings = []
-                _filtered.append(node)
-
-        if pending_headings:
-            logger.debug("Dropping %d trailing empty heading(s): %s", len(pending_headings), pending_headings)
-
-        # Nest articles under their parent annex
-        current_annex = None
-        for node in _filtered:
-            headings = node.metadata.get("headings", [])
-            if not headings:
-                current_annex = None
-                continue
-            last = headings[-1]
-            if _ANNEX_PATTERN.match(last):
-                current_annex = last
-            elif current_annex and any(p.match(last) for p in _HEADING_PATTERNS):
-                if len(headings) == 1 or headings[0] != current_annex:
-                    node.metadata["headings"] = [current_annex] + headings
-                if len(headings) == 1 or headings[0] != current_annex:
-                    node.metadata["headings"] = [current_annex] + headings
-            else:
-                current_annex = None
-
-        return _filtered
+        return all_nodes
 
 
 if __name__ == "__main__":
