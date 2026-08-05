@@ -16,7 +16,12 @@ from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import LLMRerank
 
-from app.config import DOCS_DIR, POSTGRES_CONFIG, LLM_CONFIG
+from app.config import (
+    DOCS_DIR,
+    POSTGRES_CONFIG,
+    LLM_CONFIG,
+    RETRIEVAL_CONFIG,
+)
 from app.prompts import query_gen_prompt
 import logging
 import sys
@@ -31,25 +36,18 @@ def setup_logging():
     )
 
 
-def initialize_rag():
-    setup_logging()
-    nest_asyncio.apply()
-
+def setup_phoenix():
     register(endpoint="http://localhost:6006/v1/traces")
     set_global_handler("arize_phoenix")
 
-    # -----------------------
-    # Embeddings
-    # -----------------------
+
+def configure_models():
+    """Set global embed/LLM settings. Idempotent."""
     Settings.embed_model = HuggingFaceEmbedding(
         model_name="BAAI/bge-m3",
         device="cuda",
         max_length=8192,
     )
-
-    # -----------------------
-    # LLM
-    # -----------------------
     Settings.llm = OpenAILike(
         model=LLM_CONFIG["model"],
         api_base=LLM_CONFIG["api_base"],
@@ -57,10 +55,10 @@ def initialize_rag():
         is_chat_model=True,
     )
 
-    # -----------------------
-    # Vector DB
-    # -----------------------
-    vector_store = PGVectorStore.from_params(
+
+def build_vector_store():
+    """Build the PGVectorStore client (hybrid search)."""
+    return PGVectorStore.from_params(
         host=POSTGRES_CONFIG["host"],
         port=POSTGRES_CONFIG["port"],
         user=POSTGRES_CONFIG["user"],
@@ -72,27 +70,82 @@ def initialize_rag():
         text_search_config="simple",
     )
 
-    # -----------------------
-    # Load docs + index
-    # -----------------------
+
+def _postgres_conn():
     import psycopg2
 
-    conn = psycopg2.connect(
+    return psycopg2.connect(
         host=POSTGRES_CONFIG["host"],
         port=POSTGRES_CONFIG["port"],
         user=POSTGRES_CONFIG["user"],
         password=POSTGRES_CONFIG["password"],
         database=POSTGRES_CONFIG["database"],
     )
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute(f"TRUNCATE data_{POSTGRES_CONFIG['table_name']}")
-        logging.getLogger(__name__).info("Purged vector store table.")
-    conn.close()
 
+
+def vector_store_row_count() -> int:
+    """Number of rows currently in the vector store table."""
+    conn = _postgres_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM data_{POSTGRES_CONFIG['table_name']}")
+            return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _truncate_vector_store():
+    conn = _postgres_conn()
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"TRUNCATE data_{POSTGRES_CONFIG['table_name']}")
+    finally:
+        conn.close()
+    logging.getLogger(__name__).info("Purged vector store table.")
+
+
+def build_index(
+    docs_dir: str = DOCS_DIR,
+    purge: bool = True,
+):
+    """Build the vector index for the docs.
+
+    Args:
+        docs_dir: directory containing the PDFs to index.
+        purge: if True, truncate the vector store table before ingesting.
+            If False and the vector store is already populated, the existing
+            index is reused (no re-ingestion); an empty store is ingested.
+    """
+    # -----------------------
+    # Embeddings
+    # -----------------------
+    configure_models()
+
+    # -----------------------
+    # Vector DB
+    # -----------------------
+    vector_store = build_vector_store()
+
+    # -----------------------
+    # Reuse existing store when not purging
+    # -----------------------
+    if not purge:
+        count = vector_store_row_count()
+        if count > 0:
+            logging.getLogger(__name__).info(
+                "Reusing existing vector store (%d rows).", count
+            )
+            return VectorStoreIndex.from_vector_store(vector_store)
+    else:
+        _truncate_vector_store()
+
+    # -----------------------
+    # Ingest docs + index
+    # -----------------------
     from app.utils import DoclingIngester
 
-    nodes = DoclingIngester(docs_dir=DOCS_DIR).ingest()
+    nodes = DoclingIngester(docs_dir=docs_dir).ingest()
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
     index = VectorStoreIndex(
@@ -101,25 +154,95 @@ def initialize_rag():
         show_progress=True,
     )
 
-    # -----------------------
-    # Retrievers
-    # -----------------------
-    dense = index.as_retriever(similarity_top_k=10)
-    sparse = index.as_retriever(
+    return index
+
+
+def _build_dense(index, cfg: dict):
+    """Dense (vector) retriever: top_k override or dense_top_k."""
+    return index.as_retriever(similarity_top_k=cfg.get("top_k", cfg["dense_top_k"]))
+
+
+def _build_sparse(index, cfg: dict):
+    """Sparse (full-text) retriever: top_k override or sparse_top_k."""
+    return index.as_retriever(
         vector_store_query_mode="sparse",
-        similarity_top_k=10,
+        similarity_top_k=cfg.get("top_k", cfg["sparse_top_k"]),
     )
 
-    retriever = QueryFusionRetriever(
+
+def _build_fusion(index, cfg: dict, retriever_class=None):
+    """Query fusion over dense + sparse retrievers."""
+    dense = _build_dense(index, cfg)
+    sparse = _build_sparse(index, cfg)
+    retriever_class = retriever_class or QueryFusionRetriever
+    return retriever_class(
         [dense, sparse],
-        similarity_top_k=10,
-        num_queries=4,
-        mode="reciprocal_rerank",
+        similarity_top_k=cfg["fusion_top_k"],
+        num_queries=cfg["num_queries"],
+        mode=cfg["fusion_mode"],
         use_async=True,
         query_gen_prompt=query_gen_prompt,
     )
 
-    reranker = LLMRerank(choice_batch_size=10, top_n=5)
+
+RETRIEVER_BUILDERS = {
+    "dense": _build_dense,
+    "sparse": _build_sparse,
+    "fusion": _build_fusion,
+}
+
+
+def build_retriever(index, cfg: dict | None = None, retriever_class=None):
+    """Build the retriever for the given index from a config dict.
+
+    cfg keys (see RETRIEVAL_CONFIG defaults):
+        retriever_type: "fusion" (default) or "dense" or "sparse"
+        top_k: optional override for the non-fusion retrievers' similarity_top_k
+        dense_top_k, sparse_top_k: per-source top-k
+        fusion_top_k: final fused top-k
+        num_queries: sub-queries generated by the fusion retriever
+        fusion_mode: e.g. "reciprocal_rerank"
+
+    retriever_class: optional QueryFusionRetriever subclass (e.g. one that
+        records generated sub-queries). Defaults to QueryFusionRetriever.
+
+    To add another retriever type, add a builder function and register it in
+    RETRIEVER_BUILDERS under its retriever_type name.
+    """
+    cfg = {**RETRIEVAL_CONFIG, **(cfg or {})}
+
+    retriever_type = cfg.get("retriever_type", "fusion")
+    builder = RETRIEVER_BUILDERS.get(retriever_type)
+    if builder is None:
+        raise ValueError(
+            f"Unknown retriever_type: {retriever_type}. "
+            f"Known types: {sorted(RETRIEVER_BUILDERS)}"
+        )
+    if retriever_type == "fusion":
+        return _build_fusion(index, cfg, retriever_class)
+    return builder(index, cfg)
+
+
+def build_reranker(cfg: dict | None = None):
+    """Build the node postprocessor (LLM rerank) from a config dict."""
+    cfg = {**RETRIEVAL_CONFIG, **(cfg or {})}
+    if not cfg["rerank_on"]:
+        return None
+    return LLMRerank(
+        choice_batch_size=cfg.get("rerank_batch_size", 10),
+        top_n=cfg["rerank_top_n"],
+    )
+
+
+def initialize_rag(purge: bool = False):
+    setup_logging()
+    nest_asyncio.apply()
+    setup_phoenix()
+
+    index = build_index(purge=purge)
+
+    retriever = build_retriever(index)
+    reranker = build_reranker()
 
     # -----------------------
     # Query engine
@@ -127,9 +250,9 @@ def initialize_rag():
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
         response_mode="tree_summarize", ## TODO: Need to split the pipeline to allow different response modes
-        node_postprocessors=[reranker],
+        node_postprocessors=[reranker] if reranker else None,
         streaming=True,
-    )   
+    )
 
     return query_engine
 
