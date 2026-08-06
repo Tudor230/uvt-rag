@@ -275,6 +275,8 @@ def make_judges(cache_dir: Path | None = None):
             "api_key": JUDGE_CONFIG["api_key"],
             "base_url": JUDGE_CONFIG["api_base"],
             "thinking": JUDGE_CONFIG.get("thinking"),
+            "timeout": JUDGE_CONFIG.get("timeout", 600.0),
+            "max_retries": JUDGE_CONFIG.get("max_retries", 5),
         }
     )
     cache = None
@@ -286,8 +288,8 @@ def make_judges(cache_dir: Path | None = None):
         client=AsyncOpenAI(
             api_key=JUDGE_CONFIG["api_key"],
             base_url=JUDGE_CONFIG["api_base"],
-            timeout=120.0,
-            max_retries=3,
+            timeout=JUDGE_CONFIG.get("timeout", 600.0),
+            max_retries=JUDGE_CONFIG.get("max_retries", 5),
         ),
         max_tokens=16000,
         temperature=JUDGE_CONFIG.get("temperature", 0.0),
@@ -439,7 +441,7 @@ def print_summary(report: dict):
     print("\n" + "=" * 78)
     print(f"RAG RETRIEVAL EVALUATION SUMMARY — {report['label']}")
     print("=" * 78)
-    for stage in ("base", "reranked"):
+    for stage in report["aggregates"]:
         ragas_agg = report["aggregates"][stage]["ragas"]
         umbrela_agg = report["aggregates"][stage]["umbrela"]
         print(f"\n[{stage}]")
@@ -454,8 +456,8 @@ def print_summary(report: dict):
     lat = report.get("latencies", {})
     if lat:
         print("\n[retrieval latency (s)]")
-        for part in ("base", "rerank"):
-            stats = lat.get(part, {})
+        for part in lat:
+            stats = lat[part]
             print(
                 f"  {part:7s} mean={stats.get('mean')} "
                 f"p50={stats.get('p50')} p95={stats.get('p95')} p99={stats.get('p99')}"
@@ -498,8 +500,12 @@ def main():
         index, retrieval_cfg, retriever_class=retriever_class
     )
     reranker = build_reranker(retrieval_cfg)
+    stage_names = ["base"] if reranker is None else ["base", "reranked"]
     logger.info(
-        "Retriever: %s (%s)", retriever_type, type(retriever).__name__
+        "Retriever: %s (%s) | stages: %s",
+        retriever_type,
+        type(retriever).__name__,
+        stage_names,
     )
 
     per_query_records = []
@@ -523,21 +529,22 @@ def main():
             sub_queries = list(getattr(retriever, "last_sub_queries", []))
             base_texts = [n.node.get_content() for n in base_nodes]
 
-            t_rerank = time.perf_counter()
+            latencies = {"base": round(base_latency, 4)}
+            stages = [("base", base_texts, args.k_values_base)]
             if reranker is not None:
+                t_rerank = time.perf_counter()
                 reranked_nodes = reranker.postprocess_nodes(base_nodes, qb)
-            else:
-                reranked_nodes = base_nodes
-            rerank_latency = time.perf_counter() - t_rerank
-            reranked_texts = [n.node.get_content() for n in reranked_nodes]
+                latencies["rerank"] = round(time.perf_counter() - t_rerank, 4)
+                stages.append(
+                    ("reranked",
+                     [n.node.get_content() for n in reranked_nodes],
+                     args.k_values_reranked)
+                )
 
             record = {
                 "user_input": query,
                 "sub_queries": sub_queries,
-                "latencies": {
-                    "base": round(base_latency, 4),
-                    "rerank": round(rerank_latency, 4),
-                },
+                "latencies": latencies,
                 "reference": str(row.get("reference", "")),
                 "persona_name": row.get("persona_name"),
                 "query_style": row.get("query_style"),
@@ -547,10 +554,7 @@ def main():
                 "stages": {},
             }
 
-            for stage_name, texts, k_vals in (
-                ("base", base_texts, args.k_values_base),
-                ("reranked", reranked_texts, args.k_values_reranked),
-            ):
+            for stage_name, texts, k_vals in stages:
                 umbrela = run_umbrela(query, texts, umbrela_metric, k_vals)
                 if umbrela is None:
                     record["stages"][stage_name] = {
@@ -577,8 +581,9 @@ def main():
                     },
                     "token_usage": umbrela,
                 }
+                mrr = record["stages"][stage_name]["umbrela"]["MRR"]
                 span.set_attribute(
-                    f"eval.{stage_name}.umbrela.MRR", record["stages"][stage_name]["umbrela"]["MRR"] or -1
+                    f"eval.{stage_name}.umbrela.MRR", -1 if mrr is None else mrr
                 )
                 span.set_attribute(
                     f"eval.{stage_name}.num_retrieved", len(texts)
@@ -589,8 +594,8 @@ def main():
     logger.info("Retrieval done in %.1fs. Scoring ragas metrics ...", time.time() - t0)
 
     # ── ragas per stage ──────────────────────────────────────────────────
-    ragas_per_query = {"base": [], "reranked": []}
-    for stage_name in ("base", "reranked"):
+    ragas_per_query = {s: [] for s in stage_names}
+    for stage_name in stage_names:
         samples = [
             {
                 "user_input": rec["user_input"],
@@ -631,7 +636,7 @@ def main():
             ragas_per_query[stage],
             [rec["stages"][stage]["umbrela"] for rec in per_query_records],
         )
-        for stage in ("base", "reranked")
+        for stage in stage_names
     }
 
     # ── strata ───────────────────────────────────────────────────────────
@@ -643,7 +648,7 @@ def main():
         for idx in dataset.index:
             grouped.setdefault(str(dataset.at[idx, col]), []).append(int(idx))
         stage_strata = {}
-        for stage in ("base", "reranked"):
+        for stage in stage_names:
             stage_strata[stage] = {
                 value: stage_aggregates(
                     [ragas_per_query[stage][i] for i in idxs],
@@ -667,13 +672,17 @@ def main():
         "retrieval_config": {
             k: v for k, v in retrieval_cfg.items() if k not in ("retriever_kwargs",)
         },
-        "k_values": {"base": args.k_values_base, "reranked": args.k_values_reranked},
+        "k_values": {
+            stage: args.k_values_base if stage == "base" else args.k_values_reranked
+            for stage in stage_names
+        },
         "num_queries": len(per_query_records),
         "dataset": str(args.dataset),
         "aggregates": aggregates,
         "latencies": {
-            "base": latency_stats([r["latencies"]["base"] for r in per_query_records]),
-            "rerank": latency_stats([r["latencies"]["rerank"] for r in per_query_records]),
+            part: latency_stats([r["latencies"][part] for r in per_query_records])
+            for part in ("base", "rerank")
+            if part in per_query_records[0]["latencies"]
         },
         "strata": strata,
         "per_query": per_query_records,

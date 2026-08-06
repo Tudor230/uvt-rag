@@ -50,6 +50,8 @@ class DeepSeekJudge(OpenAIModel):
         self.client = openai.OpenAI(
             api_key=self._api_key,
             base_url=self.base_url,
+            timeout=model_options.get("timeout", 600.0),
+            max_retries=model_options.get("max_retries", 5),
         )
         self.thinking = model_options.get("thinking")
 

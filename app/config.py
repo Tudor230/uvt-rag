@@ -24,6 +24,8 @@ JUDGE_CONFIG = {
     "api_key": os.getenv("API_KEY", ""),
     "temperature": 0.0,
     "thinking": "disabled",
+    "timeout": 600.0,
+    "max_retries": 5,
 }
 
 RETRIEVAL_CONFIG = {
