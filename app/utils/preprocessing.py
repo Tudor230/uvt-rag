@@ -63,8 +63,9 @@ _FOOTER_NR_ANNEXE_RE = re.compile(r"(?i)^nr\.?\s+anexe")
 class PreprocessContext:
     """Shared per-document state threaded through the preprocessing steps.
 
-    ``items_to_delete`` is intentionally shared across all documents in a single
-    ``ingest()`` call (preserves the original cross-document accumulation).
+    ``items_to_delete`` must be per-document: docling refs are positional per
+    document, so accumulating them across documents makes deletions from one
+    document collide with (and delete) innocent items in later documents.
     ``heading_candidates`` is per-document.
     """
 

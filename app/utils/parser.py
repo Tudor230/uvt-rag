@@ -69,7 +69,6 @@ class DoclingIngester:
 
         logger.info("Loading %d PDFs from %s with DoclingReader ...", len(pdf_paths), self._docs_dir)
         documents = []
-        items_to_delete = []
         for path in pdf_paths:
             # 1. Parse the document natively with Docling
             result = self._doc_converter.convert(path)
@@ -90,6 +89,7 @@ class DoclingIngester:
                     json.dump(inspection_data, f, indent=2)
 
             # 2. Pre-process: intercept and fix misclassified layout elements
+            items_to_delete = []
             ctx = PreprocessContext(dl_doc, items_to_delete)
             for item, level in dl_doc.iterate_items():
                 for step in ITEM_STEPS:
