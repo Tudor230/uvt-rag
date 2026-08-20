@@ -20,12 +20,14 @@ LLM_CONFIG = {
 
 JUDGE_CONFIG = {
     "model": "deepseek-v4-flash",
-    "api_base": "https://api.deepseek.com",
+    # "api_base": "https://api.deepseek.com",
+    "api_base": "https://opencode.ai/zen/go/v1",
     "api_key": os.getenv("API_KEY", ""),
     "temperature": 0.0,
     "thinking": "disabled",
     "timeout": 600.0,
     "max_retries": 5,
+    "cache_size_limit": 50 * 1024**3,  # 50 GB
 }
 
 RETRIEVAL_CONFIG = {

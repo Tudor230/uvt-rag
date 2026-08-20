@@ -39,7 +39,6 @@ from openai import AsyncOpenAI
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.schema import QueryBundle
 
-from ragas.cache import DiskCacheBackend
 from ragas.llms import llm_factory
 from ragas.metrics.collections import (
     ContextEntityRecall,
@@ -51,7 +50,7 @@ from ragas.metrics.collections import (
 from open_rag_eval.data_classes.rag_results import RetrievalResult
 
 from app.config import JUDGE_CONFIG, RETRIEVAL_CONFIG
-from app.judges import DeepSeekJudge, ParallelUMBRELAMetric
+from app.judges import DeepSeekJudge, ParallelUMBRELAMetric, SizedDiskCacheBackend
 from app.rag_pipeline import (
     RETRIEVER_BUILDERS,
     build_index,
@@ -277,12 +276,21 @@ def make_judges(cache_dir: Path | None = None):
             "thinking": JUDGE_CONFIG.get("thinking"),
             "timeout": JUDGE_CONFIG.get("timeout", 600.0),
             "max_retries": JUDGE_CONFIG.get("max_retries", 5),
+            "cache_dir": str(cache_dir) if cache_dir is not None else None,
+            "cache_size_limit": JUDGE_CONFIG.get("cache_size_limit"),
         }
     )
     cache = None
     if cache_dir is not None:
-        cache = DiskCacheBackend(cache_dir=str(cache_dir))
-        logger.info("Ragas judge cache enabled at %s", cache_dir)
+        cache = SizedDiskCacheBackend(
+            cache_dir=str(cache_dir),
+            size_limit=JUDGE_CONFIG.get("cache_size_limit"),
+        )
+        logger.info(
+            "Ragas judge cache enabled at %s (size_limit=%d bytes)",
+            cache_dir,
+            JUDGE_CONFIG.get("cache_size_limit"),
+        )
     ragas_llm = llm_factory(
         JUDGE_CONFIG["model"],
         client=AsyncOpenAI(
@@ -291,7 +299,7 @@ def make_judges(cache_dir: Path | None = None):
             timeout=JUDGE_CONFIG.get("timeout", 600.0),
             max_retries=JUDGE_CONFIG.get("max_retries", 5),
         ),
-        max_tokens=16000,
+        max_tokens=64000,
         temperature=JUDGE_CONFIG.get("temperature", 0.0),
         extra_body={
             "thinking": {"type": JUDGE_CONFIG.get("thinking", "disabled")}

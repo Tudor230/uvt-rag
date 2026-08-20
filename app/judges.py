@@ -6,12 +6,15 @@ and override only ``parse`` to use DeepSeek's native JSON mode
 (``response_format={"type": "json_object"}``) with the pydantic schema pasted
 into the prompt.
 """
+import copy
+import hashlib
 import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import openai
+from diskcache import Cache
 from pydantic import BaseModel, TypeAdapter
 from tenacity import (
     retry,
@@ -23,7 +26,20 @@ from tenacity import (
 from open_rag_eval.models.llm_judges import OpenAIModel
 from open_rag_eval.metrics.umbrela_metric import UMBRELAMetric, UMBRELAScore
 
+from ragas.cache import DiskCacheBackend
+
 logger = logging.getLogger(__name__)
+
+DEFAULT_CACHE_SIZE_LIMIT = 50 * 1024**3  # 50 GB
+
+
+class SizedDiskCacheBackend(DiskCacheBackend):
+    """Ragas DiskCacheBackend with a configurable size limit."""
+
+    def __init__(self, cache_dir: str = ".cache", size_limit: int = DEFAULT_CACHE_SIZE_LIMIT):
+        from diskcache import Cache
+
+        self.cache = Cache(cache_dir, size_limit=size_limit)
 
 
 class DeepSeekJudge(OpenAIModel):
@@ -54,6 +70,29 @@ class DeepSeekJudge(OpenAIModel):
             max_retries=model_options.get("max_retries", 5),
         )
         self.thinking = model_options.get("thinking")
+
+        cache_dir = model_options.get("cache_dir")
+        cache_size_limit = model_options.get(
+            "cache_size_limit", DEFAULT_CACHE_SIZE_LIMIT
+        )
+        self._cache = (
+            Cache(cache_dir, size_limit=cache_size_limit) if cache_dir else None
+        )
+        if self._cache is not None:
+            logger.info(
+                "DeepSeek judge cache enabled at %s (size_limit=%d bytes)",
+                cache_dir,
+                cache_size_limit,
+            )
+
+    def _cache_key(self, structured_prompt: str, response_format: BaseModel) -> str:
+        payload = {
+            "model": self.model_name,
+            "schema": response_format.__name__,
+            "prompt": structured_prompt,
+        }
+        raw = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _clean_kwargs(self, model_kwargs: dict | None) -> dict:
         kwargs = dict(model_kwargs or {})
@@ -98,6 +137,14 @@ Please respond with a JSON object that matches this exact schema:
 
 Return only the JSON object, no other text."""
 
+        cache_key = None
+        if self._cache is not None:
+            cache_key = self._cache_key(structured_prompt, response_format)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug("DeepSeek judge cache hit (%s)", response_format.__name__)
+                return copy.deepcopy(cached)
+
         completion = self._call(
             [
                 {
@@ -129,10 +176,13 @@ Return only the JSON object, no other text."""
         self._coerce_enum_strs(response_json, schema)
         parsed_response = TypeAdapter(response_format).validate_python(response_json)
 
-        return {
+        result = {
             "response": parsed_response,
             "metadata": metadata,
         }
+        if cache_key is not None:
+            self._cache.set(cache_key, result)
+        return result
 
     @staticmethod
     def _coerce_enum_strs(response_json: dict, schema: dict) -> None:
