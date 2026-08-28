@@ -16,6 +16,10 @@ _ANNEX_PATTERN = re.compile(
     r"^(?:Anexa|Annex)\s+(?:Nr\s*\.\s+)?\d+\.?",
     re.IGNORECASE,
 )
+# Matches "X. METODOLOGIA DE DESFĂȘURARE..." — sport mastery-probe methodology headings
+_METODOLOGIA_PATTERN = re.compile(
+    r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+", re.IGNORECASE
+)
 
 # Each pattern matches a heading line to promote from TEXT/LIST_ITEM to SECTION_HEADER.
 _HEADING_PATTERNS = [
@@ -27,13 +31,21 @@ _HEADING_PATTERNS = [
     re.compile(r"^SECȚIUNEA\s+[IVXL]+", re.IGNORECASE),  # "SECȚIUNEA I/II/III..."
     re.compile(r"^[A-Z]\)\s+[A-Z\sȘȚĂÎÂ\-]+"),          # "A) TITLE" lettered list headings
     re.compile(r"^[IVXL]+\.(?:\s*\d+\s*\.)?\s+[A-Z\sȘȚĂÎÂ\-]+"),  # "I. 1. TITLE" roman-numeral headings
-    re.compile(r"^\d+\.\s+METODOLOGIA\s+DE\s+DESFĂȘURARE.+", re.IGNORECASE),  # "X. METODOLOGIA DE DESFĂȘURARE..."
+    _METODOLOGIA_PATTERN,                     # "X. METODOLOGIA DE DESFĂȘURARE..."
 ]
 
 # Deletes running page headers matching "Regulamentul Facultății de..." from items
 _PAGE_HEADER_PATTERNS = [
     re.compile(r"^Regulamentul\s+Facultății\s+de\s+", re.IGNORECASE),
 ]
+
+# Matches the sport→probe boundary inside a merged METODOLOGIA heading, e.g.
+# "…SPORTIVĂ -ATLETISM PROBA DE 100 m plat :" or "…SPORTIVĂ FOTBAL Testul 1".
+# Uses a lookahead so the leading whitespace stays on the heading side; "PROBEI"/
+# "PROBELE" inside "PROBA DE MĂIESTRIE SPORTIVĂ" are never matched.
+_PROBE_MARKER_RE = re.compile(
+    r"\s+(?=\b(?:PROBA|Proba|Testul|Test)\b)", re.IGNORECASE
+)
 
 # Catches orphaned running-header continuation fragments at y > 680
 # (e.g. "privind organizarea și desfășurarea" or "procesului de admitere pentru")
@@ -230,6 +242,42 @@ class DemoteSectionHeaders:
                 parent=dl_doc.body,
             )
             ctx.items_to_delete.append(item)
+
+
+class SplitProbeHeadings:
+    """Splits merged METODOLOGIA headings that swallowed their probe sub-heading.
+
+    Docling sometimes merges the sport heading line with the following probe line
+    into a single section_header item, e.g.
+        "1. METODOLOGIA DE DESFĂȘURARE A PROBEI DE MĂIESTRIE SPORTIVĂ -ATLETISM PROBA DE 100 m plat :"
+    This step truncates such headings back to the clean sport heading and re-inserts
+    the probe text ("PROBA DE 100 m plat :", "Testul 1 KIHON", ...) as plain content.
+    """
+
+    name = "split_probe_headings"
+
+    def apply(self, item, ctx: PreprocessContext) -> bool:
+        text = getattr(item, "text", "").strip()
+        if item.label is not DocItemLabel.SECTION_HEADER:
+            return False
+        if not _METODOLOGIA_PATTERN.match(text):
+            return False
+        m = _PROBE_MARKER_RE.search(text)
+        if not m:
+            return False
+        heading_text = text[: m.start()].strip()
+        remaining = text[m.end():].strip()
+        if not heading_text or not remaining:
+            return False
+        item.text = heading_text
+        item.orig = heading_text
+        ctx.dl_doc.add_text(
+            label=DocItemLabel.TEXT,
+            text=remaining,
+            prov=item.prov[0] if item.prov else None,
+            parent=ctx.dl_doc.body,
+        )
+        return True
 
 
 class ApplyItemDeletions:
@@ -437,6 +485,7 @@ ITEM_STEPS = [
     RemoveFooterNrAnnexe(),
     PromoteHeadings(),
     DemoteSectionHeaders(),
+    SplitProbeHeadings(),
 ]
 
 DEFERRED_STEPS = [
