@@ -246,6 +246,7 @@ class ParallelUMBRELAMetric(UMBRELAMetric):
         total_output_tokens = 0
 
         passages = retrieval_result.retrieved_passages
+        keyed_scores: dict[str, int] = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
                 pool.submit(
@@ -271,7 +272,10 @@ class ParallelUMBRELAMetric(UMBRELAMetric):
                     raise ValueError(
                         f"Failed to parse response: {response.refusal}"
                     )
-                umbrela_scores[key] = int(response.score.value)
+                keyed_scores[key] = int(response.score.value)
+
+        for key in passages:
+            umbrela_scores[key] = keyed_scores[key]
 
         scores["token_usage"] = {
             "input_tokens": total_input_tokens,
