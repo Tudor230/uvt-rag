@@ -7,25 +7,6 @@ from app.utils.preprocessing import _ANNEX_PATTERN, _HEADING_PATTERNS
 
 logger = logging.getLogger(__name__)
 
-# Post-chunk cleanup: removes leftover "Regulamentul Facultății de [...] privind [...]" running headers
-_RUNNING_HEADER_RE = re.compile(
-    r"(?:^|\n|(?<=[.!?])\s)Regulamentul\s+Facultății\s+de\s+"
-    r"(?:.*?studii\s+de\s+licență|.*?privind(?:\s|$))",
-    re.IGNORECASE | re.DOTALL,
-)
-
-# Post-chunk cleanup: removes fragmented "pagina\nX\ndin\nY" page numbers split across lines
-_PAGE_NUM_FRAGMENTED_RE = re.compile(
-    r"(?:^|\n)pagina\s*\n\d+\s*\ndin\s*\n\d+",
-    re.IGNORECASE,
-)
-
-# Post-chunk cleanup: removes "nr. anexe <number>" references
-_NR_ANNEX_RE = re.compile(
-    r"\bnr\.?\s+anexe\s+\d+\b",
-    re.IGNORECASE,
-)
-
 _HL_URL_RE = re.compile(r'(https?://(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s,.!?;)\]]*)?)', re.IGNORECASE)
 _HL_WWW_RE = re.compile(r'(www\.[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s,.!?;)\]]*)?)', re.IGNORECASE)
 _HL_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
@@ -116,22 +97,6 @@ class AttachHyperlinks:
         return nodes
 
 
-class CleanChunkText:
-    """Removes leftover running headers, fragmented page numbers, and "nr. anexe" from chunks."""
-
-    name = "clean_chunk_text"
-
-    def apply(self, nodes: list[TextNode]) -> list[TextNode]:
-        for node in nodes:
-            content = node.get_content()
-            new_content = _RUNNING_HEADER_RE.sub("\n", content)
-            new_content = _PAGE_NUM_FRAGMENTED_RE.sub("\n", new_content)
-            new_content = _NR_ANNEX_RE.sub("", new_content)
-            if new_content != content:
-                node.text = new_content
-        return nodes
-
-
 class PromoteEmptyHeadings:
     """Drops empty chunks and pushes their headings onto the next non-empty chunk."""
 
@@ -187,7 +152,6 @@ class NestArticlesUnderAnnex:
 # Pipeline composition (in execution order).
 # To disable a step, remove it from the list below.
 GLOBAL_STEPS = [
-    CleanChunkText(),
     PromoteEmptyHeadings(),
     NestArticlesUnderAnnex(),
 ]

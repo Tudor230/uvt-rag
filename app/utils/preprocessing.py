@@ -34,9 +34,11 @@ _HEADING_PATTERNS = [
     _METODOLOGIA_PATTERN,                     # "X. METODOLOGIA DE DESFĂȘURARE..."
 ]
 
-# Deletes running page headers matching "Regulamentul Facultății de..." from items
+# Deletes running page headers matching "Regulamentul Facultății de..." from items.
+# `de\s*` also catches the truncated header line "Regulamentul Facultății de" that
+# docling emits on its own line before the faculty-name continuation.
 _PAGE_HEADER_PATTERNS = [
-    re.compile(r"^Regulamentul\s+Facultății\s+de\s+", re.IGNORECASE),
+    re.compile(r"^Regulamentul\s+Facultății\s+de\s*", re.IGNORECASE),
 ]
 
 # Matches the sport→probe boundary inside a merged METODOLOGIA heading, e.g.
@@ -48,7 +50,8 @@ _PROBE_MARKER_RE = re.compile(
 )
 
 # Catches orphaned running-header continuation fragments at y > 680
-# (e.g. "privind organizarea și desfășurarea" or "procesului de admitere pentru")
+# (e.g. "privind organizarea și desfășurarea" or "procesului de admitere pentru"
+# or the faculty-name fragment "Educație Fizică și Sport privind")
 _RH_CONTINUATION_RE = re.compile(
     r"^(?:privind\s+)?(?:"
     r"organizarea\s+și\s+desfășurarea"
@@ -56,6 +59,7 @@ _RH_CONTINUATION_RE = re.compile(
     r"|programele\s+de\s+studii"
     r"|universitare\s+de\s+la\s+ciclul\s+de"
     r"|studii\s+de\s+licență"
+    r"|[A-ZĂÂÎȘȚ][\wăâîșț\-()]*(?:\s+(?:și\s+)?[\wăâîșț\-()]+)*\s+privind"
     r")$",
     re.IGNORECASE,
 )
@@ -70,6 +74,26 @@ _FOOTER_PAGE_NUM_RE = re.compile(
 
 # Detects "nr. anexe" in footer area at y > 680
 _FOOTER_NR_ANNEXE_RE = re.compile(r"(?i)^nr\.?\s+anexe")
+
+# Item-level cleanup: removes leftover "Regulamentul Facultății de [...] privind [...]" running headers
+# embedded inside longer items (whole-item headers are deleted by RemoveRunningHeaders).
+_RUNNING_HEADER_RE = re.compile(
+    r"(?:^|\n|(?<=[.!?])\s)Regulamentul\s+Facultății\s+de\s+"
+    r"(?:.*?studii\s+de\s+licență|.*?privind(?:\s|$))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Item-level cleanup: removes fragmented "pagina\nX\ndin\nY" page numbers split across lines
+_PAGE_NUM_FRAGMENTED_RE = re.compile(
+    r"(?:^|\n)pagina\s*\n\d+\s*\ndin\s*\n\d+",
+    re.IGNORECASE,
+)
+
+# Item-level cleanup: removes "nr. anexe <number>" references
+_NR_ANNEX_RE = re.compile(
+    r"\bnr\.?\s+anexe\s+\d+\b",
+    re.IGNORECASE,
+)
 
 
 class PreprocessContext:
@@ -162,6 +186,27 @@ class RemoveFooterNrAnnexe:
         if y is not None and y > 680 and _FOOTER_NR_ANNEXE_RE.match(text):
             ctx.items_to_delete.append(item)
             return True
+        return False
+
+
+class CleanItemText:
+    """Scrubs leftover running headers, fragmented page numbers and "nr. anexe" from item text.
+
+    Runs after whole-item furniture deletion so it only targets fragments embedded
+    inside longer items (the doc-level equivalent of the old chunk-level CleanChunkText).
+    Returns ``False`` so later steps always see the item.
+    """
+
+    name = "clean_item_text"
+
+    def apply(self, item, ctx: PreprocessContext) -> bool:
+        if hasattr(item, "text") and isinstance(item.text, str):
+            new_text = _RUNNING_HEADER_RE.sub("\n", item.text)
+            new_text = _PAGE_NUM_FRAGMENTED_RE.sub("\n", new_text)
+            new_text = _NR_ANNEX_RE.sub("", new_text)
+            if new_text != item.text:
+                item.text = new_text
+                item.orig = new_text
         return False
 
 
@@ -483,6 +528,7 @@ ITEM_STEPS = [
     RemoveRHContinuation(),
     RemoveFooterPageNumbers(),
     RemoveFooterNrAnnexe(),
+    CleanItemText(),
     PromoteHeadings(),
     DemoteSectionHeaders(),
     SplitProbeHeadings(),
