@@ -72,7 +72,7 @@ _RH_CONTINUATION_SLICES = "|".join(
 # or the faculty-name fragment "Educație Fizică și Sport privind")
 _RH_CONTINUATION_RE = re.compile(
     r"^(?:privind\s+)?(?:" + _RH_CONTINUATION_SLICES
-    # The UVT regulation's footer is the full "Regulamentul UVT privind ... licență"
+    # The UVT regulation's running header is the full "Regulamentul UVT privind ... licență"
     # phrase as one section_header item (or a truncated prefix of it) at y > 680.
     + r"|Regulamentul\s+UVT\s+privind\s+(?:" + _RH_CONTINUATION_SLICES + r")"
     + r"|[A-ZĂÂÎȘȚ][\wăâîșț\-()]*(?:\s+(?:și\s+)?[\wăâîșț\-()]+)*\s+privind"
@@ -83,13 +83,13 @@ _RH_CONTINUATION_RE = re.compile(
 # Strips "pagina X din Y" from item text (inline page number within running text)
 _PAGE_NUM_STRIP_RE = re.compile(r"(?i)pagina\s+\d+\s+din\s+\d+")
 
-# Detects footer page number variants at y > 680: "pagina X", "X din Y", or "pagina X din"
-_FOOTER_PAGE_NUM_RE = re.compile(
+# Detects page-number variants in the header band (y > 680): "pagina X", "X din Y", or "pagina X din"
+_HEADER_PAGE_NUM_RE = re.compile(
     r"(?i)^(?:pagina(?:\s+\d+(?:\s+din)?)?|\d+\s+din\s+\d+|pagina\s+\d+\s+din\s*)$",
 )
 
-# Detects "nr. anexe" in footer area at y > 680
-_FOOTER_NR_ANNEXE_RE = re.compile(r"(?i)^nr\.?\s+anexe")
+# Detects "nr. anexe" in the header band (y > 680)
+_HEADER_NR_ANNEXE_RE = re.compile(r"(?i)^nr\.?\s+anexe")
 
 # Item-level cleanup: removes leftover "Regulamentul Facultății de [...] privind [...]" running headers
 # embedded inside longer items (whole-item headers are deleted by RemoveRunningHeaders).
@@ -149,6 +149,8 @@ class StripPageNumbers:
 class RemoveRunningHeaders:
     """Deletes items whose text is a running page header ("Regulamentul Facultății de...").
 
+    Only whole items located in the header band (y > 680) are deleted, so a mid-page
+    body item that happens to start with the phrase is never touched.
     Returns ``True`` when the item was deleted so later steps skip it (the original
     single-pass ``continue``).
     """
@@ -157,6 +159,9 @@ class RemoveRunningHeaders:
 
     def apply(self, item, ctx: PreprocessContext) -> bool:
         text = getattr(item, "text", "").strip()
+        y = _item_y(item)
+        if y is not None and y <= 680:
+            return False
         if any(p.match(text) for p in _PAGE_HEADER_PATTERNS):
             ctx.items_to_delete.append(item)
             return True
@@ -177,29 +182,29 @@ class RemoveRHContinuation:
         return False
 
 
-class RemoveFooterPageNumbers:
-    """Deletes footer page number variants ("pagina X", "X din Y") located at y > 680."""
+class RemoveHeaderPageNumbers:
+    """Deletes page-number variants ("pagina X", "X din Y") located in the header band (y > 680)."""
 
-    name = "remove_footer_page_numbers"
+    name = "remove_header_page_numbers"
 
     def apply(self, item, ctx: PreprocessContext) -> bool:
         text = getattr(item, "text", "").strip()
         y = _item_y(item)
-        if y is not None and y > 680 and _FOOTER_PAGE_NUM_RE.match(text):
+        if y is not None and y > 680 and _HEADER_PAGE_NUM_RE.match(text):
             ctx.items_to_delete.append(item)
             return True
         return False
 
 
-class RemoveFooterNrAnnexe:
-    """Deletes "nr. anexe" references located in the footer area at y > 680."""
+class RemoveHeaderNrAnnexe:
+    """Deletes "nr. anexe" references located in the header band (y > 680)."""
 
-    name = "remove_footer_nr_annexe"
+    name = "remove_header_nr_annexe"
 
     def apply(self, item, ctx: PreprocessContext) -> bool:
         text = getattr(item, "text", "").strip()
         y = _item_y(item)
-        if y is not None and y > 680 and _FOOTER_NR_ANNEXE_RE.match(text):
+        if y is not None and y > 680 and _HEADER_NR_ANNEXE_RE.match(text):
             ctx.items_to_delete.append(item)
             return True
         return False
@@ -210,6 +215,10 @@ class CleanItemText:
 
     Runs after whole-item furniture deletion so it only targets fragments embedded
     inside longer items (the doc-level equivalent of the old chunk-level CleanChunkText).
+    The running-header scrub is limited to items located in the header band (y > 680):
+    running headers sit at the top of a merged item, so ``prov[0]`` is still the header y.
+    Page-number and "nr. anexe" scrubs stay ungated — their junk can merge at the END of a
+    body item (e.g. "...devin eligibili pentru Nr. anexe 5"), where ``prov[0]`` is the body y.
     Returns ``False`` so later steps always see the item.
     """
 
@@ -217,7 +226,10 @@ class CleanItemText:
 
     def apply(self, item, ctx: PreprocessContext) -> bool:
         if hasattr(item, "text") and isinstance(item.text, str):
-            new_text = _RUNNING_HEADER_RE.sub("\n", item.text)
+            new_text = item.text
+            y = _item_y(item)
+            if y is None or y > 680:
+                new_text = _RUNNING_HEADER_RE.sub("\n", new_text)
             new_text = _PAGE_NUM_FRAGMENTED_RE.sub("\n", new_text)
             new_text = _NR_ANNEX_RE.sub("", new_text)
             if new_text != item.text:
@@ -671,8 +683,8 @@ ITEM_STEPS = [
     StripPageNumbers(),
     RemoveRunningHeaders(),
     RemoveRHContinuation(),
-    RemoveFooterPageNumbers(),
-    RemoveFooterNrAnnexe(),
+    RemoveHeaderPageNumbers(),
+    RemoveHeaderNrAnnexe(),
     CleanItemText(),
     PromoteHeadings(),
     DemoteSectionHeaders(),
