@@ -1,14 +1,14 @@
 # ── Defaults (overridable via CLI flags) ──────────────────────────────
 defaults:
-  testset_size: 50
-  docs_dir: "docs-ragas"
+  testset_size: 250
+  docs_dir: "docs"
   output_csv: "data/testset.csv"
   query_styles: ["MISSPELLED", "POOR_GRAMMAR", "PERFECT_GRAMMAR", "WEB_SEARCH_LIKE"]
   query_lengths: ["SHORT", "MEDIUM", "LONG"]
   embed_device: "cuda"
   embed_model: "BAAI/bge-m3"
-  llm_model: "ibm-granite/granite-4.1-8b"
-  llm_base_url: "http://localhost:8000/v1"
+  llm_model: "deepseek-v4-flash"
+  llm_base_url: "https://api.deepseek.com"
   max_workers: 4
   batch_size: 8
 
@@ -17,40 +17,23 @@ personas:
   - name: "Student Român"
     role_description: >
       Un student român care dorește să aplice la o facultate din cadrul Universității de Vest din
-      Timișoara. Se interesează de calculul notei de admitere, taxele de înscriere și de școlarizare,
-      programele de studii disponibile la fiecare facultate, probele de concurs și examenele necesare,
-      documentele și actele pe care trebuie să le depună, și termenele-limită din calendarul admiterii
-      pentru anul universitar 2026-2027.
+      Timișoara. Formulează întrebările în limba română.
     weight: 1
 
   - name: "Roman de Pretutindeni"
     role_description: >
       Un român din diaspora care aplică din străinătate la o facultate din cadrul Universității de
-      Vest din Timișoara. Se interesează de condițiile specifice pentru românii de pretutindeni,
-      calculul notei de admitere pentru candidații din diaspora, taxele aplicabile, programele de
-      studii disponibile, probele de concurs și examenele, documentele și actele necesare (inclusiv
-      echivalări de studii din străinătate), calendarul admiterii și termenele-limită specifice
-      pentru anul universitar 2026-2027.
+      Vest din Timișoara. Formulează întrebările în limba română.
     weight: 1
 
   - name: "EU Student"
     role_description: >
       An international student from a European Union member state applying to a faculty at the West
-      University of Timișoara. Interested in understanding how the admission grade is calculated for
-      international applicants, tuition and admission fees, available study programs across faculties,
-      required entrance exams and tests, necessary documents (including translated and apostilled
-      certificates), and the admission calendar and deadlines for the 2026-2027 academic year. Asks
-      questions in English about the admission process at UVT.
+      University of Timișoara. Asks questions in English about the admission process at UVT.
     weight: 1
 
   - name: "Non-EU Student"
     role_description: >
       An international student from a country outside the European Union applying to a faculty at the
-      West University of Timișoara. Interested in understanding how the admission grade is calculated
-      for non-EU international applicants, tuition and admission fees (including any higher rates for
-      non-EU students), available study programs across faculties, required entrance exams and tests,
-      necessary documents (including translated, legalized and apostilled certificates, visa
-      requirements, letter of acceptance, and recognition of foreign diplomas), and the admission
-      calendar and deadlines for the 2026-2027 academic year. Asks questions in English about the
-      admission process at UVT.
+      West University of Timișoara. Asks questions in English about the admission process at UVT.
     weight: 1
