@@ -8,6 +8,7 @@ from docling.chunking import HybridChunker, BaseChunker
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions
 from docling.datamodel.base_models import InputFormat
+from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 from llama_index.readers.docling import DoclingReader
 from llama_index.node_parser.docling import DoclingNodeParser
@@ -41,9 +42,16 @@ class DoclingIngester:
         self.pipeline_options.images_scale = 2.0
         self.pipeline_options.generate_parsed_pages = True
         self._docs_dir = Path(docs_dir)
+        # The default (thread-based) backend breaks layout detection for these PDFs:
+        # two-column technique tables (e.g. the JUDO METODOLOGIA) and running headers
+        # come out jumbled. The legacy DoclingParseDocumentBackend parses them in PDF
+        # reading order, which the preprocessing steps rely on.
         self._doc_converter = doc_converter or DocumentConverter(
             format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=self.pipeline_options)
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=self.pipeline_options,
+                    backend=DoclingParseDocumentBackend,
+                )
             }
         )
         self._reader = DoclingReader(

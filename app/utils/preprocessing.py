@@ -1,8 +1,8 @@
 import logging
 import re
 
-from docling_core.types.doc.document import GroupItem, ListGroup, RefItem
-from docling_core.types.doc.labels import DocItemLabel
+from docling_core.types.doc.document import GroupItem, ListGroup, RefItem, TextItem
+from docling_core.types.doc.labels import DocItemLabel, GroupLabel
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +572,117 @@ class CleanupDocDict:
         return doc_dict
 
 
+class ReorderColumnarGroupLeaves:
+    """Re-emits ``key_value_area`` group leaves in PDF reading order.
+
+    Two-column technique tables (e.g. the JUDO METODOLOGIA: uppercased test/technique
+    names in the left column, exercises in the right) are parsed by docling as a
+    ``key_value_area`` group whose leaves come out jumbled (column-major instead of
+    row-major). This step sorts the group's leaf texts by reading position
+    ``(page_no, -bbox.t, bbox.l)`` and re-emits them as one or more flat body-level
+    ``ListGroup`` blocks. The blocks are split wherever a body-level text line falls
+    inside the group's vertical span (e.g. "TESTUL 2" between the SUTEMI and OSAE
+    blocks), so that heading keeps its reading position after ReorderBodyChildren.
+    """
+
+    name = "reorder_columnar_group_leaves"
+
+    def apply(self, ctx: PreprocessContext) -> None:
+        dl_doc = ctx.dl_doc
+
+        def _leaves_of(node, out: list) -> None:
+            for ref in node.children:
+                child = ref.resolve(dl_doc)
+                if isinstance(child, GroupItem) and child.children:
+                    _leaves_of(child, out)
+                elif isinstance(child, TextItem) and not child.children:
+                    out.append(child)
+
+        def _pos(item) -> tuple:
+            b = item.prov[0].bbox
+            return (item.prov[0].page_no, -b.t, b.l)
+
+        def _pos_info(item) -> tuple:
+            return item.prov[0].page_no, item.prov[0].bbox.t
+
+        def _subtree_groups(node, out: list) -> None:
+            for ref in list(node.children):
+                child = ref.resolve(dl_doc)
+                if isinstance(child, GroupItem) and child is not node:
+                    out.append(child)
+                    _subtree_groups(child, out)
+
+        body_texts = [
+            ref.resolve(dl_doc)
+            for ref in dl_doc.body.children
+            if isinstance(ref.resolve(dl_doc), TextItem)
+            and (ref.resolve(dl_doc).text or "").strip()
+            and ref.resolve(dl_doc).prov
+        ]
+
+        for group in list(dl_doc.groups):
+            if group.label != GroupLabel.KEY_VALUE_AREA:
+                continue
+            leaves = []
+            _leaves_of(group, leaves)
+            if len(leaves) < 2:
+                continue
+            sorted_leaves = sorted(leaves, key=_pos)
+            if sorted_leaves == leaves:
+                continue
+            pages = {_pos_info(leaf)[0] for leaf in sorted_leaves}
+            if len(pages) != 1:
+                continue
+            page = next(iter(pages))
+            ys = [_pos_info(leaf)[1] for leaf in sorted_leaves]
+            max_y, min_y = max(ys), min(ys)
+            split_ys = sorted(
+                (
+                    item.prov[0].bbox.t
+                    for item in body_texts
+                    if item.prov[0].page_no == page and min_y < item.prov[0].bbox.t < max_y
+                ),
+                reverse=True,
+            )
+
+            blocks = []
+            remaining = list(sorted_leaves)
+            for hy in split_ys:
+                above = [leaf for leaf in remaining if _pos_info(leaf)[1] > hy]
+                below = [leaf for leaf in remaining if _pos_info(leaf)[1] < hy]
+                if above:
+                    blocks.append(above)
+                remaining = below
+            if remaining:
+                blocks.append(remaining)
+            blocks = [b for b in blocks if b]
+            if not blocks:
+                continue
+
+            subtree = []
+            _subtree_groups(group, subtree)
+
+            parent = group.parent.resolve(dl_doc) if group.parent else None
+            if parent is not None:
+                parent.children = [r for r in parent.children if r.resolve(dl_doc) is not group]
+            detached = [group] + subtree
+            dl_doc.body.children = [r for r in dl_doc.body.children if r.resolve(dl_doc) not in detached]
+            group.children = []
+            for nested in subtree:
+                nested.children = []
+
+            for block in blocks:
+                list_group = dl_doc.add_list_group(parent=dl_doc.body)
+                for leaf in block:
+                    old_parent = leaf.parent.resolve(dl_doc) if leaf.parent else None
+                    if old_parent is not None and old_parent is not list_group:
+                        old_parent.children = [
+                            r for r in old_parent.children if r.resolve(dl_doc) is not leaf
+                        ]
+                    leaf.parent = RefItem(cref=list_group.self_ref)
+                    list_group.children.append(RefItem(cref=leaf.self_ref))
+
+
 class ReorderBodyChildren:
     """Reorders body children by reading position, grouping pages into columns."""
 
@@ -696,6 +807,7 @@ DEFERRED_STEPS = [
     SplitHeadingGroups(),
     SplitColumnLists(),
     FlattenGroupItemLists(),
+    ReorderColumnarGroupLeaves(),
 ]
 
 DICT_STEPS = [
