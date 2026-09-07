@@ -33,6 +33,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_CACHE_SIZE_LIMIT = 50 * 1024**3  # 50 GB
 
 
+def judge_headers(cfg: dict) -> dict:
+    """Build request headers for judge LLM calls from a config dict.
+
+    Maps ``user_agent`` -> ``User-Agent`` and ``opencode_session`` ->
+    ``x-opencode-session``, omitting any unset/empty values so the client
+    keeps its SDK defaults when no custom headers are configured.
+    """
+    headers = {}
+    if cfg.get("user_agent"):
+        headers["User-Agent"] = cfg["user_agent"]
+    if cfg.get("opencode_session"):
+        headers["x-opencode-session"] = cfg["opencode_session"]
+    return headers
+
+
 class SizedDiskCacheBackend(DiskCacheBackend):
     """Ragas DiskCacheBackend with a configurable size limit."""
 
@@ -63,11 +78,13 @@ class DeepSeekJudge(OpenAIModel):
         self._api_key = model_options["api_key"]
         os.environ.setdefault("OPENAI_API_KEY", self._api_key)
         super().__init__(model_options)
+        headers = judge_headers(model_options)
         self.client = openai.OpenAI(
             api_key=self._api_key,
             base_url=self.base_url,
             timeout=model_options.get("timeout", 600.0),
             max_retries=model_options.get("max_retries", 5),
+            default_headers=headers or None,
         )
         self.thinking = model_options.get("thinking")
 

@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,7 +51,12 @@ from ragas.metrics.collections import (
 from open_rag_eval.data_classes.rag_results import RetrievalResult
 
 from app.config import JUDGE_CONFIG, RETRIEVAL_CONFIG
-from app.judges import DeepSeekJudge, ParallelUMBRELAMetric, SizedDiskCacheBackend
+from app.judges import (
+    DeepSeekJudge,
+    ParallelUMBRELAMetric,
+    SizedDiskCacheBackend,
+    judge_headers,
+)
 from app.rag_pipeline import (
     RETRIEVER_BUILDERS,
     build_index,
@@ -268,6 +274,13 @@ def get_index(purge: bool):
 
 
 def make_judges(cache_dir: Path | None = None):
+    session_id = os.environ.get("JUDGE_OPENCODE_SESSION") or uuid.uuid4().hex
+    headers = judge_headers(
+        {
+            "user_agent": JUDGE_CONFIG.get("user_agent"),
+            "opencode_session": session_id,
+        }
+    )
     judge = DeepSeekJudge(
         {
             "name": JUDGE_CONFIG["model"],
@@ -276,6 +289,8 @@ def make_judges(cache_dir: Path | None = None):
             "thinking": JUDGE_CONFIG.get("thinking"),
             "timeout": JUDGE_CONFIG.get("timeout", 600.0),
             "max_retries": JUDGE_CONFIG.get("max_retries", 5),
+            "user_agent": JUDGE_CONFIG.get("user_agent"),
+            "opencode_session": session_id,
             "cache_dir": str(cache_dir) if cache_dir is not None else None,
             "cache_size_limit": JUDGE_CONFIG.get("cache_size_limit"),
         }
@@ -298,6 +313,7 @@ def make_judges(cache_dir: Path | None = None):
             base_url=JUDGE_CONFIG["api_base"],
             timeout=JUDGE_CONFIG.get("timeout", 600.0),
             max_retries=JUDGE_CONFIG.get("max_retries", 5),
+            default_headers=headers or None,
         ),
         max_tokens=64000,
         temperature=JUDGE_CONFIG.get("temperature", 0.0),
@@ -306,7 +322,8 @@ def make_judges(cache_dir: Path | None = None):
         },
         cache=cache,
     )
-    return judge, ragas_llm
+    logger.info("Eval run opencode session: %s", session_id)
+    return judge, ragas_llm, session_id
 
 
 def _ascore_kwargs(metric, sample: dict) -> dict:
@@ -490,7 +507,7 @@ def main():
 
     tracer = trace.get_tracer("evaluate")
 
-    judge, ragas_llm = make_judges(
+    judge, ragas_llm, session_id = make_judges(
         cache_dir=None if args.no_cache else args.cache_dir
     )
     umbrela_metric = ParallelUMBRELAMetric(
@@ -669,7 +686,7 @@ def main():
     report = {
         "label": args.label,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "judge_config": {**JUDGE_CONFIG, "api_key": "***"},
+        "judge_config": {**JUDGE_CONFIG, "api_key": "***", "opencode_session": session_id},
         "retriever": {
             "type": retriever_type,
             "class": type(retriever).__name__,

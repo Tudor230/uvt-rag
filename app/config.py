@@ -27,7 +27,8 @@ JUDGE_CONFIG = {
     "thinking": "disabled",
     "timeout": 600.0,
     "max_retries": 5,
-    "cache_size_limit": 50 * 1024**3,  # 50 GB
+    "cache_size_limit": 50 * 1024**3,
+    "user_agent": os.getenv("JUDGE_USER_AGENT") or "eval-agent",
 }
 
 RETRIEVAL_CONFIG = {
