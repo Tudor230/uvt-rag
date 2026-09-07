@@ -40,6 +40,7 @@ from openai import AsyncOpenAI
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.schema import QueryBundle
 
+from ragas.executor import Executor
 from ragas.llms import llm_factory
 from ragas.metrics.collections import (
     ContextEntityRecall,
@@ -47,6 +48,8 @@ from ragas.metrics.collections import (
     ContextRecall,
     ContextRelevance,
 )
+from ragas.metrics.result import MetricResult
+from ragas.run_config import RunConfig
 
 from open_rag_eval.data_classes.rag_results import RetrievalResult
 
@@ -162,7 +165,7 @@ def parse_args():
         "--ragas-workers",
         type=int,
         default=8,
-        help="Concurrent judge calls for the ragas metric phase.",
+        help="Concurrent judge calls for the ragas metric phase (RunConfig.max_workers).",
     )
     parser.add_argument(
         "--cache-dir",
@@ -352,61 +355,62 @@ def _ascore_kwargs(metric, sample: dict) -> dict:
     )
 
 
-async def _score_stage(
-    samples: list[dict],
+async def _score_stages_async(
+    stage_samples: list[list[dict]],
     metrics: list,
-    concurrency: int = 8,
-) -> list[dict]:
-    """Score all samples with all metrics via ``ascore``.
+    run_config: RunConfig,
+) -> list[list[dict]]:
+    """Score all stages with all metrics via ``ascore``.
 
-    A semaphore bounds the number of in-flight judge calls; failures are
-    logged and recorded as NaN so one flaky sample doesn't abort the stage.
+    A single ragas Executor bounds concurrency (``run_config.max_workers``)
+    and converts per-job failures to NaN, so one flaky sample doesn't abort
+    a stage. All stages share one event loop.
     """
-    sem = asyncio.Semaphore(concurrency)
-
-    async def one(metric, sample):
-        async with sem:
-            try:
-                result = await metric.ascore(**_ascore_kwargs(metric, sample))
-                return result.value
-            except Exception as exc:  # noqa: BLE001 - tolerate judge failures
-                logger.warning(
-                    "%s ascore failed for %r: %s",
-                    type(metric).__name__,
-                    sample.get("user_input", "")[:60],
-                    exc,
+    executor = Executor(
+        desc="Scoring ragas metrics",
+        raise_exceptions=False,
+        run_config=run_config,
+    )
+    plan: list[tuple[int, int, str]] = []
+    for si, samples in enumerate(stage_samples):
+        for mi, sample in enumerate(samples):
+            for metric in metrics:
+                executor.submit(
+                    metric.ascore,
+                    **_ascore_kwargs(metric, sample),
+                    name=metric.name,
                 )
-                return float("nan")
+                plan.append((si, mi, metric.name))
 
-    tasks = [one(m, s) for s in samples for m in metrics]
-    values = await asyncio.gather(*tasks)
+    results = await executor.aresults()
 
-    per_sample: list[dict] = []
-    idx = 0
-    for _ in samples:
-        row = {}
-        for metric in metrics:
-            row[metric.name] = values[idx]
-            idx += 1
-        per_sample.append(row)
-    return per_sample
+    rows: dict[tuple[int, int], dict[str, float]] = {}
+    for (si, mi, name), value in zip(plan, results):
+        rows.setdefault((si, mi), {})[name] = (
+            value.value if isinstance(value, MetricResult) else value
+        )
+
+    return [
+        [rows[(si, mi)] for mi in range(len(samples))]
+        for si, samples in enumerate(stage_samples)
+    ]
 
 
 def run_ragas(
-    samples: list[dict],
+    stage_samples: list[list[dict]],
     ragas_llm,
-    concurrency: int = 8,
-) -> list[dict]:
-    """Score one stage with the four ragas retrieval metrics."""
-    if not samples:
-        return []
+    run_config: RunConfig,
+) -> list[list[dict]]:
+    """Score every stage with the four ragas retrieval metrics."""
+    if not any(stage_samples):
+        return [[] for _ in stage_samples]
     metrics = [
         ContextPrecision(llm=ragas_llm),
         ContextRecall(llm=ragas_llm),
         ContextEntityRecall(llm=ragas_llm),
         ContextRelevance(llm=ragas_llm),
     ]
-    return asyncio.run(_score_stage(samples, metrics, concurrency))
+    return asyncio.run(_score_stages_async(stage_samples, metrics, run_config))
 
 
 def run_umbrela(
@@ -433,32 +437,21 @@ def run_umbrela(
         return None
 
 
-def mean(values: list[float]) -> float:
-    values = [v for v in values if v is not None and v == v]  # drop None/NaN
-    return round(sum(values) / len(values), 6) if values else None
-
-
-def percentile(values: list[float], p: float) -> float | None:
-    values = sorted(v for v in values if v is not None and v == v)
-    if not values:
-        return None
-    import math
-
-    k = (len(values) - 1) * p
-    lo = math.floor(k)
-    hi = math.ceil(k)
-    if lo == hi:
-        return round(values[int(k)], 4)
-    frac = k - lo
-    return round(values[lo] * (1 - frac) + values[hi] * frac, 4)
+def mean(values: list[float]) -> float | None:
+    """Mean of non-null values (NaN/None dropped), or None when empty."""
+    s = pd.Series(values).dropna()
+    return round(float(s.mean()), 6) if not s.empty else None
 
 
 def latency_stats(latencies: list[float]) -> dict:
+    s = pd.Series(latencies).dropna()
+    if s.empty:
+        return {"mean": None, "p50": None, "p95": None, "p99": None}
     return {
-        "mean": mean(latencies),
-        "p50": percentile(latencies, 0.5),
-        "p95": percentile(latencies, 0.95),
-        "p99": percentile(latencies, 0.99),
+        "mean": round(float(s.mean()), 6),
+        "p50": round(float(s.quantile(0.5)), 4),
+        "p95": round(float(s.quantile(0.95)), 4),
+        "p99": round(float(s.quantile(0.99)), 4),
     }
 
 
@@ -509,6 +502,10 @@ def main():
 
     judge, ragas_llm, session_id = make_judges(
         cache_dir=None if args.no_cache else args.cache_dir
+    )
+    ragas_run_config = RunConfig(
+        max_workers=args.ragas_workers,
+        timeout=int(JUDGE_CONFIG.get("timeout", 600)),
     )
     umbrela_metric = ParallelUMBRELAMetric(
         judge, max_workers=args.umbrela_workers
@@ -620,19 +617,25 @@ def main():
 
     # ── ragas per stage ──────────────────────────────────────────────────
     ragas_per_query = {s: [] for s in stage_names}
-    for stage_name in stage_names:
-        samples = [
-            {
-                "user_input": rec["user_input"],
-                "retrieved_contexts": rec["stages"][stage_name]["retrieved_contexts"],
-                "reference": rec["reference"],
-            }
-            for rec in per_query_records
+    if stage_names:
+        stage_samples = [
+            [
+                {
+                    "user_input": rec["user_input"],
+                    "retrieved_contexts": rec["stages"][stage_name]["retrieved_contexts"],
+                    "reference": rec["reference"],
+                }
+                for rec in per_query_records
+            ]
+            for stage_name in stage_names
         ]
-        scores = run_ragas(samples, ragas_llm, concurrency=args.ragas_workers)
-        for rec, score in zip(per_query_records, scores):
-            rec["stages"][stage_name]["ragas"] = score
-            ragas_per_query[stage_name].append(score)
+        scores_by_stage = run_ragas(
+            stage_samples, ragas_llm, ragas_run_config
+        )
+        for stage_name, scores in zip(stage_names, scores_by_stage):
+            for rec, score in zip(per_query_records, scores):
+                rec["stages"][stage_name]["ragas"] = score
+                ragas_per_query[stage_name].append(score)
 
     # ── aggregate ────────────────────────────────────────────────────────
     def mean_dict_over_keys(rows: list[dict], keys: list[str]) -> dict:
@@ -670,8 +673,8 @@ def main():
         if col not in dataset.columns:
             continue
         grouped: dict[str, list[int]] = {}
-        for idx in dataset.index:
-            grouped.setdefault(str(dataset.at[idx, col]), []).append(int(idx))
+        for value, idxs in dataset.groupby(col, dropna=False).groups.items():
+            grouped[str(value)] = [int(i) for i in idxs]
         stage_strata = {}
         for stage in stage_names:
             stage_strata[stage] = {
