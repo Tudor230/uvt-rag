@@ -4,7 +4,6 @@ import nest_asyncio
 
 from llama_index.core import (
     VectorStoreIndex,
-    StorageContext,
     Settings,
     set_global_handler,
 )
@@ -17,7 +16,6 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import LLMRerank
 
 from app.config import (
-    DOCS_DIR,
     POSTGRES_CONFIG,
     LLM_CONFIG,
     RETRIEVAL_CONFIG,
@@ -94,7 +92,7 @@ def vector_store_row_count() -> int:
         conn.close()
 
 
-def _truncate_vector_store():
+def truncate_vector_store():
     conn = _postgres_conn()
     conn.autocommit = True
     try:
@@ -105,17 +103,12 @@ def _truncate_vector_store():
     logging.getLogger(__name__).info("Purged vector store table.")
 
 
-def build_index(
-    docs_dir: str = DOCS_DIR,
-    purge: bool = True,
-):
-    """Build the vector index for the docs.
+def build_index():
+    """Wrap the existing vector store in a queryable index.
 
-    Args:
-        docs_dir: directory containing the PDFs to index.
-        purge: if True, truncate the vector store table before ingesting.
-            If False and the vector store is already populated, the existing
-            index is reused (no re-ingestion); an empty store is ingested.
+    The store must be populated first (see ``python -m app.ingest``); this
+    function never purges or ingests. Raises when the store is empty so
+    workers fail fast instead of re-ingesting.
     """
     # -----------------------
     # Embeddings
@@ -126,35 +119,15 @@ def build_index(
     # Vector DB
     # -----------------------
     vector_store = build_vector_store()
+    count = vector_store_row_count()
+    if count == 0:
+        raise RuntimeError(
+            f"Vector store table data_{POSTGRES_CONFIG['table_name']} is empty. "
+            "Run `python -m app.ingest` to populate it first."
+        )
 
-    # -----------------------
-    # Reuse existing store when not purging
-    # -----------------------
-    if not purge:
-        count = vector_store_row_count()
-        if count > 0:
-            logging.getLogger(__name__).info(
-                "Reusing existing vector store (%d rows).", count
-            )
-            return VectorStoreIndex.from_vector_store(vector_store)
-    else:
-        _truncate_vector_store()
-
-    # -----------------------
-    # Ingest docs + index
-    # -----------------------
-    from app.utils import DoclingIngester
-
-    nodes = DoclingIngester(docs_dir=docs_dir).ingest()
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-    index = VectorStoreIndex(
-        nodes,
-        storage_context=storage_context,
-        show_progress=True,
-    )
-
-    return index
+    logging.getLogger(__name__).info("Using existing vector store (%d rows).", count)
+    return VectorStoreIndex.from_vector_store(vector_store)
 
 
 def _build_dense(index, cfg: dict):
@@ -234,12 +207,12 @@ def build_reranker(cfg: dict | None = None):
     )
 
 
-def initialize_rag(purge: bool = False):
+def initialize_rag():
     setup_logging()
     nest_asyncio.apply()
     setup_phoenix()
 
-    index = build_index(purge=purge)
+    index = build_index()
 
     retriever = build_retriever(index)
     reranker = build_reranker()

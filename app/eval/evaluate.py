@@ -123,11 +123,6 @@ def parse_args():
         help="Directory for the labeled JSON output.",
     )
     parser.add_argument(
-        "--purge",
-        action="store_true",
-        help="Purge the vector store table before ingesting (default off in eval).",
-    )
-    parser.add_argument(
         "--max-queries",
         type=int,
         default=None,
@@ -264,16 +259,6 @@ def parse_retriever_spec(value: str | None) -> dict:
     cfg = {"retriever_type": retriever_type}
     cfg.update(spec.get("kwargs", {}))
     return cfg
-
-
-def get_index(purge: bool):
-    """Return the index, reusing a populated vector store when purge is off.
-
-    ``build_index`` handles the reuse internally: purge=True truncates and
-    re-ingests; purge=False wraps the existing store when populated (no
-    re-ingestion) and only ingests an empty store.
-    """
-    return build_index(purge=purge)
 
 
 def make_judges(cache_dir: Path | None = None):
@@ -517,7 +502,7 @@ def main():
     retriever_class = (
         RecordingFusionRetriever if retriever_type == "fusion" else None
     )
-    index = get_index(args.purge)
+    index = build_index()
     retriever = build_retriever(
         index, retrieval_cfg, retriever_class=retriever_class
     )
