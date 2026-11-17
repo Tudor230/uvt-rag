@@ -30,8 +30,8 @@ FACULTY_MAP: dict[str, str] = {
     "FEAA": "Facultatea de Economie și Administrare a Afacerilor",
     "FD": "Facultatea de Drept",
     "FEFS": "Facultatea de Educație Fizică și Sport",
-    "FLIFT": "Facultatea de Litere, Istorie și Teologie",
-    "FPSE": "Facultatea de Psihologie, Sociologie și Educație",
+    "FLIFT": "Facultatea de Litere, Istorie, Filosofie și Teologie ",
+    "FPSE": "Facultatea de Psihologie și Științe ale Educației",
     "FAD": "Facultatea de Arte și Design",
 }
 
