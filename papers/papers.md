@@ -2,8 +2,8 @@
 #
 # My thesis: An Empirical Evaluation of RAG Pipeline Components and Production
 #            Trade-Offs for University Admission Regulations
-# Updated: 2026-11-21
-# Corpus: 23 PDFs in papers/ + 2 web-only sources (BGE reranker card, Cohere docs)
+# Updated: 2026-11-23
+# Corpus: 23 PDFs in papers/pdf/ + 2 web-only sources (BGE reranker card, Cohere docs)
 # BibTeX: papers/references.bib (25 entries)
 #
 # Legend
@@ -24,7 +24,7 @@
 
 
 [P01] elchafei2026hrag
-File: papers/2026.semeval-1.155.pdf
+File: papers/pdf/2026.semeval-1.155.pdf
 Title: H-RAG at SemEval-2026 Task 8: Hierarchical Parent-Child Retrieval for
        Multi-Turn RAG Conversations
 Authors: Passant Elchafei, Hossam Emam, Mohamed Alansary, Monorama Swain,
@@ -56,7 +56,7 @@ Placement in my thesis: Related work (RQ1, RQ3) and design justification for
 
 
 [P02] nguyen2025urag
-File: papers/2501.16276v1.pdf
+File: papers/pdf/2501.16276v1.pdf
 Title: URAG: Implementing a Unified Hybrid RAG for Precise Answers in
        University Admission Chatbots - A Case Study at HCMUT
 Authors: Long S. T. Nguyen, Tho T. Quan
@@ -89,7 +89,7 @@ Placement in my thesis: Related work (admissions domain) and PROD motivation.
 
 
 [P03] khasanova2025design
-File: papers/electronics-14-03095.pdf
+File: papers/pdf/electronics-14-03095.pdf
 Title: Design and Performance Evaluation of LLM-Based RAG Pipelines for Chatbot
        Services in International Student Admissions
 Authors: Maksuda Khasanova Zafar kizi, Youngjung Suh
@@ -125,7 +125,7 @@ Placement in my thesis: Related work (closest system), novelty statement,
 
 
 [P04] setiawan2026performance
-File: papers/3707+-+Surya+3789-3798.pdf
+File: papers/pdf/3707+-+Surya+3789-3798.pdf
 Title: Performance Analysis of Reasoning Models in RAG-Based Question Answering
        System for University Admission Services
 Authors: Muhammad Surya Adhi Setiawan, Arista Pratama,
@@ -160,7 +160,7 @@ Placement in my thesis: Related work (domain, RQ2) and discussion of model
 
 
 [P17] wojtasik2025polichat
-File: papers/wojtasik2025polichat.pdf
+File: papers/pdf/wojtasik2025polichat.pdf
 Title: PoliChat: Retrieval Augmented Generation on University Documents and
        Regulations
 Authors: Konrad Wojtasik, Adrian Berdowski, Inez Okulska, Maciej Piasecki
@@ -205,7 +205,7 @@ Placement in my thesis: Related work (closest domain system), RQ1 context-size
 
 
 [P05] lu2026hichunk
-File: papers/2509.11552v3.pdf
+File: papers/pdf/2509.11552v3.pdf
 Title: HiChunk: Evaluating and Enhancing Retrieval Augmented Generation with
        Hierarchical Chunking
 Authors: Wensheng Lu, Keyu Chen, Zhifeng Shen, Ruizhi Qiao, Xing Sun
@@ -236,7 +236,7 @@ Placement in my thesis: RQ1 design and evaluation methodology (evidence
 
 
 [P06] taiwo2026evaluating
-File: papers/2603.24556v1.pdf
+File: papers/pdf/2603.24556v1.pdf
 Title: Evaluating Chunking Strategies for Retrieval-Augmented Generation in Oil
        and Gas Enterprise Documents
 Authors: Samuel Taiwo, Mohd Amaluddin Yusoff
@@ -267,7 +267,7 @@ Placement in my thesis: RQ1 hypotheses, PROD cost argument, and
 
 
 [P07] yang2026structure
-File: papers/2608.00824v1.pdf
+File: papers/pdf/2608.00824v1.pdf
 Title: Structure-Aware Semantic Chunking with Title-Chain Prefixes:
        A 1600-Query Evaluation and the Measurement Trap in Text-Transform
        Ablations
@@ -303,7 +303,7 @@ Placement in my thesis: RQ1 metadata/heading injection and the
 
 
 [P08] wasson2002using
-File: papers/W02-0405.pdf
+File: papers/pdf/W02-0405.pdf
 Title: Using Summaries in Document Retrieval
 Authors: Mark Wasson
 Venue: Proceedings of the Workshop on Automatic Summarization (including DUC
@@ -330,7 +330,7 @@ Placement in my thesis: Optional related work on summary-based enrichment.
 
 
 [P09] gao2023precise
-File: papers/2212.10496v1.pdf
+File: papers/pdf/2212.10496v1.pdf
 Title: Precise Zero-Shot Dense Retrieval without Relevance Labels
 Authors: Luyu Gao, Xueguang Ma, Jimmy Lin, Jamie Callan
 Venue: Proceedings of the 61st Annual Meeting of the ACL (Volume 1: Long
@@ -357,7 +357,7 @@ Placement in my thesis: RQ2 design and hypotheses.
 
 
 [P10] wang2024searching
-File: papers/2407.01219v1.pdf
+File: papers/pdf/2407.01219v1.pdf
 Title: Searching for Best Practices in Retrieval-Augmented Generation
 Authors: Xiaohua Wang, Zhenghua Wang, Xuan Gao, Feiran Zhang, Yixin Wu,
          Zhibo Xu, Tianyuan Shi, Zhengyuan Wang, Shizheng Li, Qi Qian,
@@ -382,7 +382,7 @@ Placement in my thesis: Methodology, related work, and PROD framing.
 
 
 [P11] akarsu2026bm25
-File: papers/2604.01733v1.pdf
+File: papers/pdf/2604.01733v1.pdf
 Title: From BM25 to Corrective RAG: Benchmarking Retrieval Strategies for
        Text-and-Table Documents
 Authors: Meftun Akarsu, Recep Kaan Karaman, Christopher Mierbach
@@ -417,7 +417,7 @@ Placement in my thesis: RQ2 core, evaluation design, and PROD cost-accuracy
 
 
 [P12] yan2026corrective
-File: papers/Corrective Retrieval Augmented Generation.pdf
+File: papers/pdf/Corrective Retrieval Augmented Generation.pdf
 Title: Corrective Retrieval Augmented Generation
 Authors: Shi-Qi Yan, Jia-Chen Gu, Yun Zhu, Zhen-Hua Ling
 Venue: Findings of the Association for Computational Linguistics:
@@ -445,7 +445,7 @@ Placement in my thesis: RQ2 related work and router/corrective design.
 
 
 [P13] jeong2024adaptiverag
-File: papers/Adaptive-RAG Learning to Adapt Retrieval-Augmented Large Language Models through Question Complexity.pdf
+File: papers/pdf/Adaptive-RAG Learning to Adapt Retrieval-Augmented Large Language Models through Question Complexity.pdf
 Title: Adaptive-RAG: Learning to Adapt Retrieval-Augmented Large Language Models
        through Question Complexity
 Authors: Soyeong Jeong, Jinheon Baek, Sukmin Cho, Sung Ju Hwang, Jong C. Park
@@ -472,7 +472,7 @@ Placement in my thesis: RQ2 Router design and PROD (accuracy vs latency by
 
 
 [P14] asai2024selfrag
-File: papers/Self-RAG Learning to Retrieve, Generate, and Critique through Self-Reflection.pdf
+File: papers/pdf/Self-RAG Learning to Retrieve, Generate, and Critique through Self-Reflection.pdf
 Title: Self-RAG: Learning to Retrieve, Generate, and Critique through
        Self-Reflection
 Authors: Akari Asai, Zeqiu Wu, Yizhong Wang, Avirup Sil, Hannaneh Hajishirzi
@@ -503,7 +503,7 @@ Placement in my thesis: RQ2 related work.
 
 
 [P15] li2025retrieval
-File: papers/1-s2.0-S2666920X25000578-main.pdf
+File: papers/pdf/1-s2.0-S2666920X25000578-main.pdf
 Title: Retrieval-augmented generation for educational application:
        A systematic survey
 Authors: Zongxi Li, Zijian Wang, Weiming Wang, Kevin Hung, Haoran Xie,
@@ -528,7 +528,7 @@ Placement in my thesis: Introduction and related work (education).
 
 
 [P16] virabyan2025enhancing
-File: papers/2601.04206v1.pdf
+File: papers/pdf/2601.04206v1.pdf
 Title: Enhancing Admission Inquiry Responses with Fine-Tuned Models and
        Retrieval-Augmented Generation
 Authors: Aram Virabyan
@@ -561,7 +561,7 @@ Placement in my thesis: Related work (domain) and discussion/limitations.
 
 
 [E01] chen2024m3 — BGE-M3 / M3-Embedding
-File: papers/chen2024m3-embedding.pdf
+File: papers/pdf/chen2024m3-embedding.pdf
 Venue: Findings of ACL 2024, pp. 2318-2335. DOI 10.18653/v1/2024.findings-acl.137
 Relevant because: This is my base embedding model. It supports dense, sparse,
         and multi-vector retrieval in one model over 100+ languages and up to
@@ -570,7 +570,7 @@ Relevant because: This is my base embedding model. It supports dense, sparse,
         benchmarks, not Romanian admission regulations.
 
 [E02] auer2024docling — Docling Technical Report
-File: papers/auer2024docling-technical-report.pdf
+File: papers/pdf/auer2024docling-technical-report.pdf
 Venue: arXiv:2408.09869, 2024. DOI 10.48550/arXiv.2408.09869
 Relevant because: It documents my ingestion layer: layout analysis (DocLayNet)
         and table structure recognition (TableFormer), with efficient CPU
@@ -579,7 +579,7 @@ Relevant because: It documents my ingestion layer: layout analysis (DocLayNet)
         updated toolkit description.
 
 [E03] livathinos2025docling — Docling: An Efficient Open-Source Toolkit
-File: papers/livathinos2025docling-toolkit.pdf
+File: papers/pdf/livathinos2025docling-toolkit.pdf
 Venue: arXiv:2501.17887, 2025 (AAAI-25 Workshop on Open-Source AI for
         Mainstream Use). DOI 10.48550/arXiv.2501.17887
 Relevant because: The newer, broader Docling paper: unified structured document
@@ -588,7 +588,7 @@ Relevant because: The newer, broader Docling paper: unified structured document
         report when describing the toolkit as a whole.
 
 [E04] es2024ragas — RAGAs
-File: papers/es2024ragas.pdf
+File: papers/pdf/es2024ragas.pdf
 Venue: EACL 2024 System Demonstrations, pp. 150-158.
         DOI 10.18653/v1/2024.eacl-demo.16
 Relevant because: The evaluation framework for Phase 1 (faithfulness, answer
@@ -598,14 +598,14 @@ Relevant because: The evaluation framework for Phase 1 (faithfulness, answer
         deterministic metrics.
 
 [E05] upadhyay2024umbrela — UMBRELA
-File: papers/upadhyay2024umbrela.pdf
+File: papers/pdf/upadhyay2024umbrela.pdf
 Venue: arXiv:2406.06519, 2024. DOI 10.48550/arXiv.2406.06519
 Relevant because: The open-source LLM relevance assessor used by open-rag-eval
         in my harness. I cite it for the golden-free judged relevance stage
         (precision@k, AP@k, MRR). Note the spelling: UMBRELA, not "UMBRELLA".
 
 [E06] nogueira2019passage — Passage Re-ranking with BERT
-File: papers/nogueira2019passage-reranking-bert.pdf
+File: papers/pdf/nogueira2019passage-reranking-bert.pdf
 Venue: arXiv:1901.04085, 2019. DOI 10.48550/arXiv.1901.04085
 Relevant because: The foundational cross-encoder reranker. I cite it when
         justifying the cross-encoder arm (Cohere/BGE) and the two-stage
